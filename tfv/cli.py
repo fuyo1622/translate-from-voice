@@ -21,6 +21,10 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     args = _parser().parse_args(argv)
+    if not hasattr(args, "func"):  # no command: start the desktop app
+        from tfv.ui.app import main as ui_main
+
+        return ui_main()
     logging.basicConfig(
         level=logging.DEBUG if args.verbose > 1 else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
@@ -42,7 +46,10 @@ def _parser() -> argparse.ArgumentParser:
 
     p = argparse.ArgumentParser(prog="tfv", description="Live captions and translation for the audio this computer is playing.")
     p.add_argument("-v", "--verbose", action="count", default=0, help="show timings (-vv: debug logging)")
-    sub = p.add_subparsers(required=True, metavar="COMMAND")
+    sub = p.add_subparsers(metavar="COMMAND", help="with no command, the desktop app starts")
+
+    ui = sub.add_parser("ui", help="start the desktop app: subtitle overlay and tray menu (the default)")
+    ui.set_defaults(func=lambda args: __import__("tfv.ui.app", fromlist=["main"]).main())
 
     d = sub.add_parser("devices", help="list output devices that can be captured")
     d.set_defaults(func=cmd_devices)

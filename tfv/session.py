@@ -186,7 +186,9 @@ class Session:
             return FileSource(cfg.file, realtime=cfg.realtime)
         from tfv.capture.loopback import LoopbackSource
 
-        return LoopbackSource(cfg.audio_device)
+        source = LoopbackSource(cfg.audio_device)
+        source.on_device_change = lambda name: self._status(f"Output changed; now listening to {name}")
+        return source
 
 
 def _close(backend) -> None:

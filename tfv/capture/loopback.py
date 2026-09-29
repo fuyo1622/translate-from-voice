@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Callable
 
 import numpy as np
@@ -39,7 +40,8 @@ class LoopbackSource(AudioSource):
     """Captures an output device (speaker or earphone) through WASAPI loopback.
 
     `device` selects the output by index or name substring; None follows the
-    Windows default output at the time `start` is called.
+    Windows default output, including when it changes while running (e.g.
+    earphones plugged in); `on_device_change` is then called with the new name.
 
     WASAPI delivers nothing while no application is playing sound, so
     consumers must not rely on a steady stream of chunks.
@@ -50,6 +52,10 @@ class LoopbackSource(AudioSource):
         self._block_ms = block_ms
         self._pa = None
         self._stream = None
+        self._on_audio: AudioCallback | None = None
+        self._lock = threading.Lock()
+        self._stopped = threading.Event()
+        self.on_device_change: Callable[[str], None] | None = None
 
     def _find_device(self, pa) -> dict:
         if self._query is None:
@@ -68,9 +74,22 @@ class LoopbackSource(AudioSource):
         raise ValueError(f"{self._query!r} matches several output devices: {names}; be more specific or use the index")
 
     def start(self, on_audio: AudioCallback, on_end: Callable[[], None]) -> None:
+        self._on_audio = on_audio
+        self._stopped.clear()
+        with self._lock:
+            self._open()
+        if self._query is None:
+            threading.Thread(target=self._follow_default, name="tfv-device-watch", daemon=True).start()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        with self._lock:
+            self._close()
+
+    def _open(self) -> None:
         import pyaudiowpatch as pyaudio
 
-        self._pa = pyaudio.PyAudio()
+        self._pa = pyaudio.PyAudio()  # a fresh instance sees devices plugged in since the last one
         try:
             dev = self._find_device(self._pa)
         except Exception:
@@ -80,6 +99,7 @@ class LoopbackSource(AudioSource):
         rate, channels = int(dev["defaultSampleRate"]), dev["maxInputChannels"]
         self.description = f"{dev['name'].removesuffix(' [Loopback]')} ({rate} Hz, {channels} ch)"
         resampler = soxr.ResampleStream(rate, SAMPLE_RATE, 1, dtype="float32")
+        on_audio = self._on_audio
 
         def callback(data, frame_count, time_info, status):
             try:
@@ -103,7 +123,7 @@ class LoopbackSource(AudioSource):
             stream_callback=callback,
         )
 
-    def stop(self) -> None:
+    def _close(self) -> None:
         if self._stream is not None:
             self._stream.stop_stream()
             self._stream.close()
@@ -111,3 +131,35 @@ class LoopbackSource(AudioSource):
         if self._pa is not None:
             self._pa.terminate()
             self._pa = None
+
+    def _follow_default(self) -> None:
+        """Reopen the capture when Windows switches the default output device."""
+        from tfv.capture.win_audio import com_thread, default_output_id
+
+        with com_thread():
+            current = default_output_id()
+            while not self._stopped.wait(2.0):
+                try:
+                    latest = default_output_id()
+                except OSError as exc:
+                    log.debug("Could not query the default output: %s", exc)
+                    continue
+                if latest == current or latest is None:
+                    continue
+                current = latest
+                self.reopen()
+
+    def reopen(self) -> None:
+        """Close and reopen the capture on the (possibly new) device."""
+        with self._lock:
+            if self._stopped.is_set():
+                return
+            self._close()
+            try:
+                self._open()
+            except Exception as exc:
+                log.warning("Could not capture the new output device: %s", exc)
+                return
+        log.info("Output device changed; now capturing %s", self.description)
+        if self.on_device_change:
+            self.on_device_change(self.description)

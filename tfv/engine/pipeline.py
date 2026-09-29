@@ -230,10 +230,12 @@ class Pipeline:
             speech_ended_at=segment.created_at,
         )  # fmt: skip
         self._recent.append(caption)
-        self._emit(caption)
         target = self.target_lang
-        if self._translator is not None and target and target != source_lang:
-            caption.target_lang = target
+        translate = self._translator is not None and bool(target) and target != source_lang
+        if translate:
+            caption.target_lang = target  # lets displays show that a translation is coming
+        self._emit(caption)
+        if translate:
             self._put_latest(self._to_translate, caption, "translation")
 
     def _mt_loop(self) -> None:
