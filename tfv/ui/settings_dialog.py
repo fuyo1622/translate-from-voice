@@ -86,19 +86,17 @@ class SettingsDialog(QDialog):
         _select(self.source, self.prefs.source_lang)
         self.target = _language_combo(include_off=True)
         _select(self.target, self.prefs.target_lang)
+        self.capture = QComboBox()
+        self.capture.addItem("What this computer plays (speaker / earphones)", "output")
+        self.capture.addItem("A microphone or other input device", "input")
+        _select(self.capture, self.prefs.capture)
         self.device = QComboBox()
-        self.device.addItem("Default output (follows speaker / earphones)", None)
-        try:
-            from tfv.capture.loopback import list_output_devices
-
-            for dev in list_output_devices():
-                self.device.addItem(dev["name"], dev["name"])
-        except Exception as exc:
-            log.warning("Could not list output devices: %s", exc)
-        _select(self.device, self.prefs.audio_device)
+        self.capture.currentIndexChanged.connect(lambda _i: self._fill_devices(None))
+        self._fill_devices(self.prefs.audio_device)
         form.addRow("Spoken language:", self.source)
         form.addRow("Translate into:", self.target)
-        form.addRow("Capture audio from:", self.device)
+        form.addRow("Capture:", self.capture)
+        form.addRow("Device:", self.device)
         hotkeys = "\n".join(f"Ctrl+Alt+{k}: {what}" for k, what in HOTKEYS.items())
         form.addRow("Hotkeys:", QLabel(hotkeys))
         return w
@@ -131,6 +129,10 @@ class SettingsDialog(QDialog):
         form.addRow("Server URL:", self.mt_url)
         form.addRow("", self.adapt)
         form.addRow("", _wrap_label("“auto” uses the profile's first option that fits this computer; see `python -m tfv hardware`."))
+        self.remote_url = QLineEdit(self.prefs.remote_url)
+        self.remote_url.setPlaceholderText("empty = run here; or ws://PC-address:8765 from `tfv serve` on a stronger PC")
+        form.addRow("Remote engine:", self.remote_url)
+        form.addRow("", _wrap_label("With a remote engine, set its token under Paid services → remote."))
         self.live = _wrap_label("")
         form.addRow("Now running:", self.live)
         return w
@@ -188,12 +190,31 @@ class SettingsDialog(QDialog):
         form.addRow("", self.locked)
         return w
 
+    def _fill_devices(self, selected: str | None) -> None:
+        self.device.clear()
+        try:
+            if self.capture.currentData() == "input":
+                from tfv.capture.input_device import list_input_devices as list_devices
+
+                self.device.addItem("Default input", None)
+            else:
+                from tfv.capture.loopback import list_output_devices as list_devices
+
+                self.device.addItem("Default output (follows speaker / earphones)", None)
+            for dev in list_devices():
+                self.device.addItem(dev["name"], dev["name"])
+        except Exception as exc:
+            log.warning("Could not list devices: %s", exc)
+        _select(self.device, selected)
+
     # -- actions ---------------------------------------------------------------------
 
     def apply(self) -> None:
         p = self.prefs
         before_engine, before_langs = p.engine_key(), (p.source_lang, p.target_lang)
+        p.capture = self.capture.currentData()
         p.audio_device = self.device.currentData()
+        p.remote_url = self.remote_url.text().strip()
         p.profile = self.profile.currentData()
         p.asr = self.asr.currentText().strip() or "auto"
         p.mt = self.mt.currentText().strip() or "auto"
@@ -237,8 +258,7 @@ class SettingsDialog(QDialog):
         if session is None:
             text = {"loading": "loading models…", "error": f"error: {self.controller.error}"}.get(self.controller.state, "stopped")
         else:
-            parts = [f"Recognition: {session.asr.description}"]
-            parts.append(f"Translation: {session.translator.description}" if session.translator else "Translation: off")
+            parts = session.describe()
             if stats := self.controller.stats():
                 parts.append(
                     f"Recognition speed {stats['asr_rtf']:.2f}x real time, translation {stats['mt_s']:.2f}s per line, "

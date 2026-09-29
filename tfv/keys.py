@@ -16,6 +16,7 @@ SERVICES = {
     "claude": "ANTHROPIC_API_KEY",
     "deepl": "DEEPL_AUTH_KEY",
     "deepgram": "DEEPGRAM_API_KEY",
+    "remote": "TFV_REMOTE_TOKEN",  # shared secret for a remote engine server
 }
 _KEYRING_NAME = "tfv"
 

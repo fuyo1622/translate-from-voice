@@ -53,6 +53,9 @@ class OpenAITranscriber(ASRBackend):
         usage.record("openai", self._model, audio_s=len(audio) / SAMPLE_RATE)
         return ASRResult(text=r.json().get("text", "").strip(), language=self._language, compute_s=time.perf_counter() - t0)
 
+    def set_language(self, language: str) -> None:
+        self._language = language
+
     def close(self) -> None:
         self._http.close()
 
@@ -83,6 +86,9 @@ class DeepgramTranscriber(ASRBackend):
         channels = r.json()["results"]["channels"]
         text = channels[0]["alternatives"][0]["transcript"] if channels and channels[0]["alternatives"] else ""
         return ASRResult(text=text.strip(), language=self._language, compute_s=time.perf_counter() - t0)
+
+    def set_language(self, language: str) -> None:
+        self._language = language
 
     def close(self) -> None:
         self._http.close()

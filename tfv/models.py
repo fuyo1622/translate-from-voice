@@ -26,7 +26,8 @@ Progress = Callable[[str, int, int], None]
 
 HF = "https://huggingface.co"
 _MARKER = ".tfv-complete"
-_WHISPER_FILES = ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*")
+# a trailing "?" marks a file that only some repositories have
+_WHISPER_FILES = ("config.json", "preprocessor_config.json?", "model.bin", "tokenizer.json", "vocabulary.*")
 
 
 @dataclass(frozen=True)
@@ -165,14 +166,24 @@ def _plan(info: ModelInfo) -> list[tuple[str, str, int | None, str | None]]:
     remote = {f["path"]: f for f in listing.json() if f["type"] == "file"}
     plan = []
     for pattern in info.files:
-        matches = fnmatch.filter(remote, pattern)
-        if not matches:
+        optional = pattern.endswith("?")
+        matches = fnmatch.filter(remote, pattern.rstrip("?"))
+        if not matches and not optional:
             raise RuntimeError(f"{info.repo} has no file matching {pattern!r}")
         for name in matches:
             f = remote[name]
             lfs = f.get("lfs") or {}
             plan.append((name, f"{HF}/{info.repo}/resolve/main/{name}", f.get("size"), lfs.get("oid")))
     return plan
+
+
+_listener: Progress | None = None
+
+
+def set_progress_listener(listener: Progress | None) -> None:
+    """Receive progress for every download that has no explicit callback (e.g. to show it in the UI)."""
+    global _listener
+    _listener = listener
 
 
 def download(
@@ -186,6 +197,7 @@ def download(
     """Download `url` to `dest`, resuming a previous partial download."""
     import httpx
 
+    progress = progress or _listener
     part = dest.with_name(dest.name + ".part")
     done = part.stat().st_size if part.exists() else 0
     headers = {"Range": f"bytes={done}-"} if done else {}

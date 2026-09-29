@@ -156,7 +156,8 @@ class TrayApp:
     # -- engine events ------------------------------------------------------------------
 
     def _on_status(self, message: str) -> None:
-        self.overlay.show_status(message)
+        # while loading, keep each message up until the next one replaces it
+        self.overlay.show_status(message, 3600 if self.controller.state == "loading" else 6)
         self.tray.setToolTip(f"tfv — {message}"[:120])
 
     def _on_state(self, state: str) -> None:

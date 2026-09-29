@@ -17,8 +17,12 @@ class Prefs:
     source_lang: str = "ja"
     target_lang: str | None = "zh"
     """None: captions only, no translation."""
+    capture: str = "output"
+    """"output": what the computer plays; "input": a microphone or virtual cable."""
     audio_device: str | None = None
-    """None follows the Windows default output (speaker or earphones)."""
+    """None follows the system default (for output: speaker or earphones, whichever is active)."""
+    remote_url: str = ""
+    """If set, models run on this `tfv serve` engine instead of locally."""
     profile: str = "auto"
     asr: str = "auto"
     mt: str = "auto"
@@ -59,7 +63,7 @@ class Prefs:
 
     def engine_key(self) -> tuple:
         """Settings whose change requires reloading the models."""
-        return (self.audio_device, self.profile, self.asr, self.mt, self.mt_url, self.adapt)
+        return (self.capture, self.audio_device, self.remote_url, self.profile, self.asr, self.mt, self.mt_url, self.adapt)
 
 
 def prefs_path() -> Path:

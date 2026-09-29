@@ -60,5 +60,9 @@ class FasterWhisperBackend(ASRBackend):
         text = "".join(s.text for s in segments).strip()
         return ASRResult(text=text, language=self._language, compute_s=time.perf_counter() - t0)
 
+    def set_language(self, language: str) -> None:
+        self._language = language
+        self._options = {**self._options, "language": language}
+
     def close(self) -> None:
         self._model = None  # CTranslate2 frees the weights and VRAM with the last reference

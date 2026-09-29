@@ -205,30 +205,41 @@ needs no code change. The user can always override profile or individual compone
   per-sentence time (0.9 s vs 0.5 s). SenseVoice reports no language probabilities, so its
   detection cannot be restricted.
 
-**Phase 2 — Translation (1 day)**
-- NLLB via CTranslate2 (CPU) and Qwen3 via llama.cpp/Ollama, with context window.
+**Phase 2 — Translation ✅ done**
+- Model manager with a catalog (sizes, licenses), resumable checksum-verified downloads.
+- NLLB-200 600M (CTranslate2, CPU); local LLMs as GGUF in a managed llama.cpp `llama-server`
+  (prebuilt b11255, Vulkan build on Windows, picks the discrete GPU, `--fit` sizes it to free
+  VRAM, per-run API key, killed with the parent via a Windows job object); any
+  OpenAI-compatible server (Ollama, LM Studio). Newer models than the original plan were
+  available by now: Qwen3.5 (0.8B–9B), TranslateGemma (4B/12B), Hunyuan-MT-7B.
+- Findings: NLLB is poor for short Japanese lines (こんにちは → "您的位置："); Qwen3.5-2B is natural
+  and fits beside Whisper turbo on 4 GB (both together ~2.5 GB VRAM), 0.2–1.9 s per line.
 
-**Phase 3 — Resource manager (1–2 days)**
-- Hardware probe, `profiles.yaml`, auto-selection, startup benchmark, OOM fallback, model manager.
-- Test by **forcing** profiles on the dev machine (`--profile cpu-low`, `CUDA_VISIBLE_DEVICES=""`,
-  VRAM cap) to simulate weaker devices.
+**Phase 3 — Resource manager ✅ done**
+- Hardware probe, `profiles.yaml` with ladders of `<model>@<device>` rungs, fit checks against
+  free VRAM/RAM, startup benchmark on bundled per-language clips, load-failure fallback, and a
+  runtime monitor that steps down a rung when a stage falls behind (verified live: swap without
+  a gap in captions).
 
-**Phase 4 — Overlay UI (1–2 days)**
-- Subtitle overlay, hotkeys, source/target language selectors, settings page showing hardware/profile/latency.
+**Phase 4 — Overlay UI ✅ done**
+- PySide6 overlay (click-through when locked), tray menu, settings window, global hotkeys, and
+  capture that follows the Windows default output when earphones are plugged in or out.
 
-**Phase 5 — Evaluation (1–2 days)** — decides whether paid backup is needed, *per profile*
-- Test set: ~10 min each of zh (TW), en, ja, incl. background music.
-- Per profile: ASR CER/WER, translation spot-check (or COMET), latency, VRAM/RAM, CPU load.
-- Output: a table that validates/adjusts the profile thresholds in §3.2.
+**Phase 5 — Evaluation ✅ done** — see [EVAL.md](EVAL.md)
+- `tfv eval` on a FLEURS subset (same sentences in zh/en/ja, CC-BY): CER/WER clean and with
+  10 dB pink noise, chrF in all six directions, speed and VRAM. Used to order the ladders.
 
-**Phase 6 — Paid backends (1 day)**
-- DeepL / Claude Haiku 4.5 translators; gpt-4o-mini-transcribe / Deepgram ASR; Soniox end-to-end.
-- Used as (a) the `cloud` profile, (b) per-component override when local quality is insufficient.
-- Explicit opt-in (audio/text leaves device), per-hour cost estimate in UI.
+**Phase 6 — Paid backends ✅ done**
+- Claude (Anthropic SDK, `claude-opus-5` at low effort with server-side refusal fallbacks,
+  model selectable), DeepL, OpenAI chat; OpenAI transcription and Deepgram for recognition;
+  keys in the OS credential store; usage and cost estimate in the settings window.
+  Soniox end-to-end streaming was not implemented (no key to verify the protocol against).
 
-**Phase 7 — Portability (later)**
-- Remote-engine mode (WebSocket server/client), AMD/Intel Vulkan path verification,
-  macOS/Linux capture adapters, packaging per OS.
+**Phase 7 — Portability ✅ done (partly untested)**
+- Remote engine over WebSocket (`tfv serve` / `--remote`, token, one client), input-device
+  capture for microphones / macOS BlackHole / Linux monitor sources, PyInstaller spec.
+- Not verified on real hardware: AMD/Intel GPUs (the Vulkan runtime was tested on NVIDIA),
+  macOS and Linux.
 
 **Later (v2+)**: streaming partial results (LocalAgreement), per-app capture (Windows process
 loopback API), diarization, more languages, glossary UI.

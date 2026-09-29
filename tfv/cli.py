@@ -53,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("devices", help="list output devices that can be captured")
     d.set_defaults(func=cmd_devices)
+    d.add_argument("--inputs", action="store_true", help="list input devices (microphones, virtual cables) instead")
 
     hw = sub.add_parser("hardware", help="show this machine, the chosen profile and which models fit")
     hw.set_defaults(func=cmd_hardware)
@@ -65,32 +66,36 @@ def _parser() -> argparse.ArgumentParser:
 
     listen = sub.add_parser("listen", help="caption (and translate) what is playing, or a file")
     listen.set_defaults(func=cmd_listen)
-    lang = listen.add_argument_group("languages")
-    lang.add_argument("--from", dest="source_lang", required=True, choices=languages.SUPPORTED, help="language being spoken")
-    lang.add_argument("--to", dest="target_lang", choices=languages.SUPPORTED, help="translate into this language")
+    _language_args(listen)
     src = listen.add_argument_group("audio source")
-    src.add_argument("--audio-device", metavar="NAME", help="output device index or name substring (default: Windows default output)")
+    src.add_argument("--capture", choices=("output", "input"), default="output", help="output = what the PC plays (default), input = microphone")
+    src.add_argument("--audio-device", metavar="NAME", help="device index or name substring (default: the system default)")
     src.add_argument("--file", type=Path, help="use an audio/video file instead of live audio")
     src.add_argument("--realtime", action="store_true", help="with --file: feed the file at playback speed")
     src.add_argument("--duration", type=float, metavar="SECONDS", help="stop after this many seconds")
-    models_group = listen.add_argument_group(
-        "models", "By default the hardware profile picks the models (see `tfv hardware`); these override it."
-    )
-    models_group.add_argument("--profile", default="auto", help="hardware profile to use (default: auto)")
-    models_group.add_argument("--asr", default="auto", metavar="CHOICE", help="recognizer, e.g. whisper-small@cuda, sensevoice-small")
-    models_group.add_argument(
-        "--mt", default="auto", metavar="CHOICE",
-        help="translator, e.g. qwen3.5-2b@gpu, nllb-600m, deepl, claude, openai-compatible:MODEL, or none",
-    )  # fmt: skip
-    models_group.add_argument("--mt-url", help="server URL for openai-compatible (e.g. http://localhost:11434 for Ollama)")
-    models_group.add_argument("--no-adapt", action="store_true", help="never switch to lighter models while running")
-    seg = listen.add_argument_group("segmentation")
-    seg.add_argument("--vad-threshold", type=float, default=0.5, help="speech probability that starts an utterance")
-    seg.add_argument("--min-silence-ms", type=int, default=500, help="pause that ends an utterance")
-    seg.add_argument("--max-segment-s", type=float, default=12.0, help="split longer speech")
+    remote = listen.add_argument_group("remote engine", "Run the models on another computer started with `tfv serve`.")
+    remote.add_argument("--remote", metavar="URL", help="engine server, e.g. ws://192.168.1.20:8765")
+    remote.add_argument("--token", help="the server's token (default: `tfv keys set remote` or $TFV_REMOTE_TOKEN)")
+    _model_args(listen)
     other = listen.add_argument_group("other")
-    other.add_argument("--threads", type=int, help="CPU threads for the models")
     other.add_argument("--log", type=Path, help="also append captions to this file")
+
+    s = sub.add_parser("serve", help="run the models for other computers on the network (remote engine)")
+    s.set_defaults(func=cmd_serve)
+    _language_args(s)
+    s.add_argument("--host", default="127.0.0.1", help="address to listen on; 0.0.0.0 for the whole LAN (default: this PC only)")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--token", help="shared secret clients must send (generated if listening beyond this PC)")
+    _model_args(s)
+
+    e = sub.add_parser("eval", help="measure recognition/translation quality and speed on this machine (FLEURS)")
+    e.set_defaults(func=cmd_eval)
+    e.add_argument("action", choices=("download", "run"))
+    e.add_argument("--n", type=int, default=20, help="clips per language to download (default 20)")
+    e.add_argument("--asr", nargs="*", default=["whisper-large-v3-turbo@cuda", "whisper-small@cuda", "sensevoice-small@cpu"])
+    e.add_argument("--mt", nargs="*", default=["nllb-600m@cpu", "qwen3.5-2b@gpu", "qwen3.5-4b@gpu", "translategemma-4b@gpu"])
+    e.add_argument("--snr", type=float, default=10.0, help="noise level for the noisy condition, dB (default 10)")
+    e.add_argument("--out", type=Path, default=Path("EVAL.md"), help="Markdown report (default EVAL.md)")
 
     m = sub.add_parser("models", help="list, download or remove models")
     m.set_defaults(func=cmd_models)
@@ -99,13 +104,90 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _language_args(parser) -> None:
+    lang = parser.add_argument_group("languages")
+    lang.add_argument("--from", dest="source_lang", required=True, choices=languages.SUPPORTED, help="language being spoken")
+    lang.add_argument("--to", dest="target_lang", choices=languages.SUPPORTED, help="translate into this language")
+
+
+def _model_args(parser) -> None:
+    group = parser.add_argument_group("models", "By default the hardware profile picks the models (see `tfv hardware`).")
+    group.add_argument("--profile", default="auto", help="hardware profile to use (default: auto)")
+    group.add_argument("--asr", default="auto", metavar="CHOICE", help="recognizer, e.g. whisper-small@cuda, sensevoice-small")
+    group.add_argument(
+        "--mt", default="auto", metavar="CHOICE",
+        help="translator, e.g. qwen3.5-2b@gpu, nllb-600m, deepl, claude, openai-compatible:MODEL, or none",
+    )  # fmt: skip
+    group.add_argument("--mt-url", help="server URL for openai-compatible (e.g. http://localhost:11434 for Ollama)")
+    group.add_argument("--no-adapt", action="store_true", help="never switch to lighter models while running")
+    group.add_argument("--threads", type=int, help="CPU threads for the models")
+    group.add_argument("--vad-threshold", type=float, default=0.5, help="speech probability that starts an utterance")
+    group.add_argument("--min-silence-ms", type=int, default=500, help="pause that ends an utterance")
+    group.add_argument("--max-segment-s", type=float, default=12.0, help="split longer speech")
+
+
+def _session_config(args):
+    from tfv.engine.segmenter import SegmenterConfig
+    from tfv.session import SessionConfig
+
+    return SessionConfig(
+        source_lang=args.source_lang, target_lang=args.target_lang,
+        capture=getattr(args, "capture", "output"), audio_device=getattr(args, "audio_device", None),
+        file=getattr(args, "file", None), realtime=getattr(args, "realtime", False),
+        profile=args.profile, asr=args.asr, mt=args.mt, mt_url=args.mt_url,
+        threads=args.threads, adapt=not args.no_adapt,
+        segmenter=SegmenterConfig(threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s),
+    )  # fmt: skip
+
+
 def cmd_devices(args) -> int:
+    if args.inputs:
+        from tfv.capture.input_device import list_input_devices
+
+        for dev in list_input_devices():
+            mark = "*" if dev["default"] else " "
+            print(f"{mark} [{dev['index']:>2}] {dev['name']}  ({dev['rate']} Hz, {dev['channels']} ch)")
+        print("\n* = default input. Use `listen --capture input --audio-device NAME`.")
+        return 0
     from tfv.capture.loopback import list_output_devices
 
     for dev in list_output_devices():
         mark = "*" if dev["default"] else " "
         print(f"{mark} [{dev['index']:>2}] {dev['name']}  ({dev['rate']} Hz, {dev['channels']} ch)")
     print("\n* = current default output. Use --audio-device with the index or part of the name.")
+    return 0
+
+
+def cmd_eval(args) -> int:
+    from tfv import evaluation, hardware
+
+    if args.action == "download":
+        evaluation.download(args.n, status=log.info)
+        return 0
+    samples = evaluation.load_manifest()
+    asr_clean, asr_noisy, mt = [], [], []
+    for choice in args.asr:
+        log.info("Recognition %s (clean)", choice)
+        asr_clean.append(evaluation.run_asr(choice, samples, None, status=log.info))
+        log.info("Recognition %s (noisy)", choice)
+        asr_noisy.append(evaluation.run_asr(choice, samples, args.snr, status=log.info))
+    for choice in args.mt:
+        log.info("Translation %s", choice)
+        mt.append(evaluation.run_mt(choice, samples, status=log.info))
+    n = max(sum(1 for s in samples if s["lang"] == lang) for lang in languages.SUPPORTED)
+    args.out.write_text(evaluation.report(hardware.probe(), n, asr_clean, asr_noisy, mt), "utf-8")
+    log.info("Wrote %s", args.out)
+    return 0
+
+
+def cmd_serve(args) -> int:
+    from tfv.remote import EngineServer
+
+    server = EngineServer(_session_config(args), host=args.host, port=args.port, token=args.token)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log.info("Stopping")
     return 0
 
 
@@ -162,10 +244,10 @@ def cmd_models(args) -> int:
     from tfv import models
 
     if args.action == "list":
-        print(f"{'model':<22}{'task':<5}{'size':>9}  {'installed':<10}license")
+        print(f"{'model':<24}{'task':<5}{'size':>9}  {'installed':<10}license")
         for info in models.CATALOG.values():
             mark = "yes" if models.is_installed(info.id) else ""
-            print(f"{info.id:<22}{info.task:<5}{info.size_mb:>6,} MB  {mark:<10}{info.license}")
+            print(f"{info.id:<24}{info.task:<5}{info.size_mb:>6,} MB  {mark:<10}{info.license}")
         print(f"\nStored in {models.models_dir()} (set TFV_MODELS_DIR to change).")
         return 0
     if not args.ids:
@@ -195,17 +277,11 @@ def _progress_printer():
 
 
 def cmd_listen(args) -> int:
+    from tfv import keys
     from tfv.engine.pipeline import Caption
-    from tfv.engine.segmenter import SegmenterConfig
-    from tfv.session import Session, SessionConfig
+    from tfv.session import Session
 
-    config = SessionConfig(
-        source_lang=args.source_lang, target_lang=args.target_lang,
-        audio_device=args.audio_device, file=args.file, realtime=args.realtime,
-        profile=args.profile, asr=args.asr, mt=args.mt, mt_url=args.mt_url,
-        threads=args.threads, adapt=not args.no_adapt,
-        segmenter=SegmenterConfig(threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s),
-    )  # fmt: skip
+    config = _session_config(args)
     logfile = open(args.log, "a", encoding="utf-8") if args.log else None
     print_lock = threading.Lock()
 
@@ -230,7 +306,12 @@ def cmd_listen(args) -> int:
                 logfile.write(line + "\n")
                 logfile.flush()
 
-    session = Session(config, show)
+    if args.remote:
+        from tfv.remote import RemoteSession
+
+        session = RemoteSession(args.remote, args.token or keys.get("remote"), config, show)
+    else:
+        session = Session(config, show)
     t0 = time.monotonic()
     try:
         session.start()

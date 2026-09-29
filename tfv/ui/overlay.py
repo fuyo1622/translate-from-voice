@@ -162,8 +162,7 @@ class OverlayWindow(QWidget):
         self._relayout()
 
     def _relayout(self) -> None:
-        now = time.monotonic()
-        self._status.setVisible(bool(self._status.text()) and (now < self._status_until or not self._rows))
+        self._status.setVisible(bool(self._status.text()) and time.monotonic() < self._status_until)
         self._layout.activate()
         height = max(40, self._layout.totalHeightForWidth(self._width))
         self.setGeometry(QRect(self._x, self._bottom - height, self._width, height))
@@ -191,8 +190,7 @@ class OverlayWindow(QWidget):
         stale = [cid for cid, row in self._rows.items() if now - row.updated > self.prefs.clear_after_s]
         for cid in stale:
             self._rows.pop(cid).delete()
-        status_expired = self._status.isVisible() and now >= self._status_until and self._rows
-        if stale or status_expired or (self._status.isVisible() and now >= self._status_until):
+        if stale or (self._status.isVisible() and now >= self._status_until):
             self._relayout()
 
     # -- moving and resizing when unlocked --------------------------------------------

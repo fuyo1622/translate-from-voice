@@ -38,15 +38,13 @@ def add_nvidia_wheel_dirs() -> list[str]:
     """
     if sys.platform != "win32":
         return []
+    roots = []
+    if frozen := getattr(sys, "_MEIPASS", None):  # a packaged build bundles them under nvidia/
+        roots.append(Path(frozen) / "nvidia")
     spec = importlib.util.find_spec("nvidia")
-    if spec is None or not spec.submodule_search_locations:
-        return []
-    dirs = [
-        str(bin_dir)
-        for root in spec.submodule_search_locations
-        for bin_dir in sorted(Path(root).glob("*/bin"))
-        if any(bin_dir.glob("*.dll"))
-    ]
+    if spec is not None and spec.submodule_search_locations:
+        roots += [Path(p) for p in spec.submodule_search_locations]
+    dirs = [str(bin_dir) for root in roots for bin_dir in sorted(root.glob("*/bin")) if any(bin_dir.glob("*.dll"))]
     path = os.environ.get("PATH", "").split(os.pathsep)
     for d in dirs:
         _dll_dir_handles.append(os.add_dll_directory(d))

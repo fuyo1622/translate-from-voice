@@ -29,5 +29,9 @@ class ASRBackend(ABC):
         rng = np.random.default_rng(0)
         self.transcribe((rng.standard_normal(SAMPLE_RATE) * 0.01).astype(np.float32))
 
+    def set_language(self, language: str) -> None:
+        """Recognize another language from the next utterance on, without reloading the model."""
+        raise NotImplementedError
+
     def close(self) -> None:
         """Release the model (and its GPU memory)."""

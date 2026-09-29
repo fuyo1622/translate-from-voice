@@ -10,6 +10,8 @@ from PySide6.QtCore import QObject, Signal
 from tfv.session import Session, SessionConfig
 from tfv.ui.prefs import Prefs
 
+# Session and remote.RemoteSession share: start, stop, pause, resume, set_languages, describe, stats.
+
 log = logging.getLogger(__name__)
 
 
@@ -23,7 +25,7 @@ class EngineController(QObject):
     def __init__(self, prefs: Prefs):
         super().__init__()
         self.prefs = prefs
-        self.session: Session | None = None
+        self.session = None
         self.state = "stopped"
         self.error = ""
         self._lock = threading.Lock()
@@ -48,15 +50,27 @@ class EngineController(QObject):
             old.stop()
         self._set_state("stopped")
 
-    def _run(self, old: Session | None, generation: int) -> None:
+    def _run(self, old, generation: int) -> None:
         if old:
             old.stop()  # free the GPU before loading again
         p = self.prefs
         config = SessionConfig(
-            source_lang=p.source_lang, target_lang=p.target_lang, audio_device=p.audio_device,
+            source_lang=p.source_lang, target_lang=p.target_lang, capture=p.capture, audio_device=p.audio_device,
             profile=p.profile, asr=p.asr, mt=p.mt, mt_url=p.mt_url or None, adapt=p.adapt,
         )  # fmt: skip
-        session = Session(config, lambda c: self._on_caption(c, generation), lambda m: self._on_status(m, generation))
+        def on_caption(caption) -> None:
+            self._on_caption(caption, generation)
+
+        def on_status(message: str) -> None:
+            self._on_status(message, generation)
+
+        if p.remote_url:
+            from tfv import keys
+            from tfv.remote import RemoteSession
+
+            session = RemoteSession(p.remote_url, keys.get("remote"), config, on_caption, on_status)
+        else:
+            session = Session(config, on_caption, on_status)
         try:
             session.start()
         except Exception as exc:
@@ -77,18 +91,20 @@ class EngineController(QObject):
             session.stop()
             return
         self._set_state("running")
+        if (p.source_lang, p.target_lang) != (config.source_lang, config.target_lang):
+            self.set_languages(p.source_lang, p.target_lang)  # changed in the menu while loading
 
     # -- live changes ------------------------------------------------------------------
 
     def set_paused(self, paused: bool) -> None:
         session = self.session
-        if not session or not session.pipeline:
+        if not session:
             return
         if paused:
-            session.pipeline.pause()
+            session.pause()
             self._set_state("paused")
         else:
-            session.pipeline.resume()
+            session.resume()
             self._set_state("running")
 
     def set_languages(self, source: str, target: str | None) -> None:
@@ -112,8 +128,7 @@ class EngineController(QObject):
         threading.Thread(target=work, name="tfv-languages", daemon=True).start()
 
     def stats(self) -> dict | None:
-        session = self.session
-        return session.pipeline.stats() if session and session.pipeline else None
+        return self.session.stats() if self.session else None
 
     # -- callbacks from engine threads ---------------------------------------------------
 
