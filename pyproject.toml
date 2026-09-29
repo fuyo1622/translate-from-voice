@@ -21,6 +21,7 @@ dependencies = [
     "psutil>=5.9",
     "pyyaml>=6",
     "keyring>=24",
+    "anthropic>=1.9",
     "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
 ]
 

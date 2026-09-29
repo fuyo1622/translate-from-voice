@@ -90,11 +90,12 @@ class LLMTranslator(Translator):
         server=None,
         timeout: float = 30.0,
         description: str = "",
+        transport=None,
     ):
         import httpx
 
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self._http = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout)
+        self._http = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout, transport=transport)
         self._model = model
         self._prompt = prompt
         self._server = server  # a LlamaServer we own and must stop
