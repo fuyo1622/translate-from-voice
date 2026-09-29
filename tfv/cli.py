@@ -1,10 +1,11 @@
-"""Command line: `python -m tfv devices` and `python -m tfv listen`."""
+"""Command line: `python -m tfv devices | listen | models`."""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
     )
-    for noisy in ("httpx", "huggingface_hub", "faster_whisper"):
+    for noisy in ("httpx", "httpcore", "huggingface_hub", "faster_whisper"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
         return args.func(args)
@@ -37,36 +38,47 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    from tfv.engine.asr import BACKENDS
+    from tfv.engine.asr import BACKENDS as ASR_BACKENDS
+    from tfv.engine.mt import BACKENDS as MT_BACKENDS
 
-    p = argparse.ArgumentParser(prog="tfv", description="Live captions for the audio this computer is playing.")
+    p = argparse.ArgumentParser(prog="tfv", description="Live captions and translation for the audio this computer is playing.")
     p.add_argument("-v", "--verbose", action="count", default=0, help="show timings (-vv: debug logging)")
     sub = p.add_subparsers(required=True, metavar="COMMAND")
 
     d = sub.add_parser("devices", help="list output devices that can be captured")
     d.set_defaults(func=cmd_devices)
 
-    listen = sub.add_parser("listen", help="transcribe what is playing (or a file)")
+    listen = sub.add_parser("listen", help="caption (and translate) what is playing, or a file")
     listen.set_defaults(func=cmd_listen)
+    lang = listen.add_argument_group("languages")
+    lang.add_argument("--from", dest="source_lang", required=True, choices=languages.SUPPORTED, help="language being spoken")
+    lang.add_argument("--to", dest="target_lang", choices=languages.SUPPORTED, help="translate into this language")
     src = listen.add_argument_group("audio source")
     src.add_argument("--audio-device", metavar="NAME", help="output device index or name substring (default: Windows default output)")
-    src.add_argument("--file", type=Path, help="transcribe an audio/video file instead of live audio")
+    src.add_argument("--file", type=Path, help="use an audio/video file instead of live audio")
     src.add_argument("--realtime", action="store_true", help="with --file: feed the file at playback speed")
     src.add_argument("--duration", type=float, metavar="SECONDS", help="stop after this many seconds")
     rec = listen.add_argument_group("recognition")
-    rec.add_argument(
-        "--from", dest="source_lang", required=True, choices=languages.SUPPORTED, help="language being spoken"
-    )
-    rec.add_argument("--asr", choices=BACKENDS, default="auto", help="recognizer (default: auto, based on hardware)")
-    rec.add_argument("--compute", choices=("auto", "cuda", "cpu"), default="auto", help="where Whisper runs")
-    rec.add_argument("--model", help="Whisper size (e.g. large-v3-turbo, small) or a model directory")
-    rec.add_argument("--threads", type=int, help="CPU threads for recognition")
+    rec.add_argument("--asr", choices=ASR_BACKENDS, default="auto", help="recognizer (default: auto, based on hardware)")
+    rec.add_argument("--asr-model", help="Whisper size (e.g. large-v3-turbo, small) or a model directory")
+    rec.add_argument("--asr-compute", choices=("auto", "cuda", "cpu"), default="auto", help="where Whisper runs")
+    mt = listen.add_argument_group("translation")
+    mt.add_argument("--mt", choices=("auto", "none", *MT_BACKENDS), default="auto", help="translator (default: auto)")
+    mt.add_argument("--mt-model", help="catalog model id (see `tfv models`), or the server's model name with --mt-url")
+    mt.add_argument("--mt-compute", choices=("auto", "cuda", "cpu"), default="auto", help="where the translator runs")
+    mt.add_argument("--mt-url", help="base URL of an OpenAI-compatible server (e.g. http://localhost:11434 for Ollama)")
     seg = listen.add_argument_group("segmentation")
     seg.add_argument("--vad-threshold", type=float, default=0.5, help="speech probability that starts an utterance")
     seg.add_argument("--min-silence-ms", type=int, default=500, help="pause that ends an utterance")
     seg.add_argument("--max-segment-s", type=float, default=12.0, help="split longer speech")
-    out = listen.add_argument_group("output")
-    out.add_argument("--log", type=Path, help="also append transcripts to this file")
+    other = listen.add_argument_group("other")
+    other.add_argument("--threads", type=int, help="CPU threads for the models")
+    other.add_argument("--log", type=Path, help="also append captions to this file")
+
+    m = sub.add_parser("models", help="list, download or remove models")
+    m.set_defaults(func=cmd_models)
+    m.add_argument("action", nargs="?", choices=("list", "download", "remove"), default="list")
+    m.add_argument("ids", nargs="*", metavar="MODEL", help="model ids for download/remove")
     return p
 
 
@@ -80,60 +92,99 @@ def cmd_devices(args) -> int:
     return 0
 
 
-def cmd_listen(args) -> int:
+def cmd_models(args) -> int:
     from tfv import models
-    from tfv.engine.asr import create_asr
-    from tfv.engine.pipeline import Pipeline, Utterance
-    from tfv.engine.segmenter import Segmenter, SegmenterConfig
-    from tfv.engine.textproc import TextPostProcessor
-    from tfv.engine.vad import SileroVAD
 
-    if args.file:
-        from tfv.capture.file import FileSource
+    if args.action == "list":
+        print(f"{'model':<22}{'task':<5}{'size':>9}  {'installed':<10}license")
+        for info in models.CATALOG.values():
+            mark = "yes" if models.is_installed(info.id) else ""
+            print(f"{info.id:<22}{info.task:<5}{info.size_mb:>6,} MB  {mark:<10}{info.license}")
+        print(f"\nStored in {models.models_dir()} (set TFV_MODELS_DIR to change).")
+        return 0
+    if not args.ids:
+        raise ValueError(f"name the model(s) to {args.action}")
+    for model_id in args.ids:
+        if args.action == "download":
+            models.ensure(model_id, progress=_progress_printer())
+            print(f"{model_id}: installed")
+        else:
+            print(f"{model_id}: {'removed' if models.remove(model_id) else 'not installed'}")
+    return 0
 
-        source = FileSource(args.file, realtime=args.realtime)
-    else:
-        from tfv.capture.loopback import LoopbackSource
 
-        source = LoopbackSource(args.audio_device)
+def _progress_printer():
+    last = [0.0]
 
-    asr = create_asr(args.asr, language=args.source_lang, compute=args.compute, model=args.model, threads=args.threads)
-    segmenter = Segmenter(
-        SileroVAD(models.silero_vad()),
-        SegmenterConfig(
-            threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s
-        ),
-    )
+    def progress(label: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if now - last[0] >= 0.5 or done == total:
+            last[0] = now
+            pct = f"{100 * done / total:5.1f}%" if total else ""
+            print(f"\r{label}: {done / 1e6:,.0f} MB {pct}   ", end="", file=sys.stderr, flush=True)
+            if done == total:
+                print(file=sys.stderr)
+
+    return progress
+
+
+def cmd_listen(args) -> int:
+    from tfv.engine.pipeline import Caption
+    from tfv.engine.segmenter import SegmenterConfig
+    from tfv.session import Session, SessionConfig
+
+    config = SessionConfig(
+        source_lang=args.source_lang, target_lang=args.target_lang,
+        audio_device=args.audio_device, file=args.file, realtime=args.realtime,
+        asr=args.asr, asr_model=args.asr_model, asr_compute=args.asr_compute,
+        mt=args.mt, mt_model=args.mt_model, mt_compute=args.mt_compute, mt_url=args.mt_url,
+        threads=args.threads,
+        segmenter=SegmenterConfig(threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s),
+    )  # fmt: skip
     logfile = open(args.log, "a", encoding="utf-8") if args.log else None
+    print_lock = threading.Lock()
 
-    def show(u: Utterance) -> None:
-        stamp = f"{int(u.segment.start // 60):02d}:{u.segment.start % 60:04.1f}"
-        cont = "…" if u.segment.forced else " "  # cut mid-speech; the sentence continues on the next line
-        line = f"[{stamp}]{cont} {u.text}"
-        if args.verbose:
-            line += f"   ({u.segment.duration:.1f}s audio, asr {u.result.compute_s:.2f}s, waited {u.queued_s:.2f}s)"
-        print(line, flush=True)
-        if logfile:
-            logfile.write(line + "\n")
-            logfile.flush()
+    def show(c: Caption) -> None:
+        stamp = f"[{int(c.start // 60):02d}:{c.start % 60:04.1f}]"
+        if c.stage == "text":
+            cont = "…" if c.forced else " "  # cut mid-speech; the sentence continues on the next line
+            line = f"{stamp}{cont} {c.text}"
+            if args.verbose:
+                line += f"   ({c.duration:.1f}s audio, asr {c.asr_s:.2f}s, waited {c.waited_s:.2f}s)"
+        elif c.stage == "translated":
+            line = f"{stamp} → {c.translation}"
+            if args.verbose:
+                line += f"   (mt {c.mt_s:.2f}s)"
+        elif args.verbose:
+            line = f"{stamp} → (not translated)"
+        else:
+            return
+        with print_lock:
+            print(line, flush=True)
+            if logfile:
+                logfile.write(line + "\n")
+                logfile.flush()
 
-    pipeline = Pipeline(source, segmenter, asr, show, postprocess=TextPostProcessor())
-    pipeline.start()
-    log.info("Recognizer: %s", asr.description)
-    log.info("Listening to %s%s", source.description, "" if args.file else " — press Ctrl+C to stop")
+    session = Session(config, show)
     t0 = time.monotonic()
     try:
-        while not pipeline.wait(0.2):
+        session.start()
+        if not args.file:
+            log.info("Press Ctrl+C to stop")
+        while not session.wait(0.2):
             if args.duration and time.monotonic() - t0 >= args.duration:
                 break
     except KeyboardInterrupt:
         log.info("Stopping")
     finally:
-        pipeline.stop()
+        session.stop()
         if logfile:
             logfile.close()
     if args.file:
         log.info("Done in %.1fs", time.monotonic() - t0)
-    if pipeline.dropped:
-        log.warning("%d utterances were dropped because recognition could not keep up", pipeline.dropped)
+    p = session.pipeline
+    if p and (p.dropped_utterances or p.dropped_translations):
+        log.warning(
+            "Could not keep up: skipped %d utterances and %d translations", p.dropped_utterances, p.dropped_translations
+        )
     return 0

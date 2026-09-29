@@ -23,6 +23,8 @@ def test_cjk_spacing_and_punctuation():
     assert post("はい,そうです!", "ja") == "はい、そうです！"
     assert post("我用 Python 寫程式, 很好", "zh") == "我用 Python 寫程式，很好"  # spaces around Latin kept
     assert post("It costs 1,000 yen, right?", "en") == "It costs 1,000 yen, right?"
+    assert post("即時翻譯的方法.", "zh") == "即時翻譯的方法。"
+    assert post("價格是3.5元,好嗎...", "zh") == "價格是3.5元，好嗎..."
 
 
 def test_chinese_becomes_traditional_taiwan():

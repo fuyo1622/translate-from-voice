@@ -13,9 +13,12 @@ dependencies = [
     "soxr>=0.3",
     "onnxruntime>=1.17",
     "faster-whisper>=1.1",
+    "ctranslate2>=4.5",
+    "tokenizers>=0.15",
     "sherpa-onnx>=1.10.20",
     "opencc>=1.1.9",
-    "huggingface_hub>=0.23",
+    "httpx>=0.27",
+    "psutil>=5.9",
     "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
 ]
 

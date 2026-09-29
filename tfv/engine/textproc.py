@@ -34,10 +34,11 @@ _MUSIC_ONLY = re.compile(r"^[\s♪♫♬#*\-~(\[（【]*(music|音楽|音乐|音
 # CJK punctuation, kana, ideographs and full-width forms
 _CJK = "　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯"
 _SPACE_IN_CJK = re.compile(f"(?<=[{_CJK}])\\s+(?=[{_CJK}])")
-_ASCII_PUNCT_IN_CJK = re.compile(f"(?<=[{_CJK}])([,?!:;])\\s*(?=[{_CJK}]|$)")
+# a lone "." (not part of "...") counts too
+_ASCII_PUNCT_IN_CJK = re.compile(f"(?<=[{_CJK}])([,?!:;]|\\.(?!\\.))\\s*(?=[{_CJK}]|$)")
 _FULLWIDTH = {
-    "zh": {",": "，", "?": "？", "!": "！", ":": "：", ";": "；"},
-    "ja": {",": "、", "?": "？", "!": "！", ":": "：", ";": "；"},
+    "zh": {",": "，", "?": "？", "!": "！", ":": "：", ";": "；", ".": "。"},
+    "ja": {",": "、", "?": "？", "!": "！", ":": "：", ";": "；", ".": "。"},
 }
 
 

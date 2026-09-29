@@ -21,7 +21,7 @@ class SenseVoiceBackend(ASRBackend):
     def __init__(self, language: str, num_threads: int | None = None, model_dir: str | None = None):
         import sherpa_onnx
 
-        path = Path(model_dir) if model_dir else models.sensevoice()
+        path = Path(model_dir) if model_dir else models.ensure("sensevoice-small").path
         # physical cores, roughly; more threads than that only adds contention
         threads = num_threads or max(1, min(4, (os.cpu_count() or 2) // 2))
         t0 = time.perf_counter()
