@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tfv"
+version = "0.1.0"
+description = "Live transcription and translation of the audio your computer is playing (zh-TW / en / ja)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "soxr>=0.3",
+    "onnxruntime>=1.17",
+    "faster-whisper>=1.1",
+    "sherpa-onnx>=1.10.20",
+    "opencc>=1.1.9",
+    "huggingface_hub>=0.23",
+    "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+# GPU speech recognition on NVIDIA cards. ctranslate2 bundles the cuDNN 9.10.2
+# dispatcher DLL, and cuDNN refuses sub-libraries of a different version, so
+# these two pins must move together.
+nvidia = [
+    "ctranslate2==4.8.2",
+    "nvidia-cudnn-cu12==9.10.2.21",
+    "nvidia-cublas-cu12>=12.4,<13",
+]
+dev = ["pytest>=8"]
+
+[project.scripts]
+tfv = "tfv.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tfv*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
