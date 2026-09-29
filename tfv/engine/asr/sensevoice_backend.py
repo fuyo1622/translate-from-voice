@@ -43,3 +43,6 @@ class SenseVoiceBackend(ASRBackend):
         self._recognizer.decode_stream(stream)
         text = stream.result.text.strip()
         return ASRResult(text=text, language=self._language, compute_s=time.perf_counter() - t0)
+
+    def close(self) -> None:
+        self._recognizer = None

@@ -164,6 +164,7 @@ class Pipeline:
         translated = [c for c in recent if c.stage == "translated"]
         return {
             "captions": len(recent),
+            "translated": len(translated),
             "asr_rtf": sum(c.asr_s for c in recent) / speech,
             "asr_s": sum(c.asr_s for c in recent) / len(recent) if recent else 0.0,
             "mt_s": sum(c.mt_s for c in translated) / len(translated) if translated else 0.0,
@@ -172,6 +173,10 @@ class Pipeline:
             "dropped_utterances": self.dropped_utterances,
             "dropped_translations": self.dropped_translations,
         }
+
+    def reset_stats(self) -> None:
+        """Forget recent timings, e.g. after swapping a backend."""
+        self._recent.clear()
 
     # -- threads ---------------------------------------------------------------
 

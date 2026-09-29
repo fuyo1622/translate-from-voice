@@ -3,49 +3,46 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from tfv import models
 from tfv.engine.mt.base import Context, Translator
 
 log = logging.getLogger(__name__)
 
-BACKENDS = ("nllb", "llama", "openai-compatible")
-
 
 def create_translator(
-    backend: str,
+    choice,
     *,
     source: str,
     target: str,
-    model: str | None = None,
-    compute: str = "auto",
     url: str | None = None,
     api_key: str | None = None,
     threads: int | None = None,
 ) -> Translator:
-    """Build and warm up a translator.
+    """Build and warm up the translator described by a resources.Choice.
 
-    - "nllb": NLLB-200 600M with CTranslate2 (CPU unless compute="cuda").
-    - "llama": a catalog GGUF model (default qwen3.5-2b) in a managed llama-server;
-      compute="cpu" keeps it off the GPU.
-    - "openai-compatible": an existing server at `url` (Ollama, LM Studio, OpenAI),
-      `model` is the server's model name; the key defaults to $TFV_LLM_API_KEY.
+    - nllb: NLLB-200 with CTranslate2 on the CPU (or CUDA with @cuda).
+    - llama: a catalog GGUF model in a managed llama-server; @cpu keeps it off the GPU.
+    - openai-compatible:<model>: an existing server at `url` (Ollama, LM Studio, vLLM).
+    - deepl, claude, openai: paid services.
     """
-    if backend == "nllb":
+    if choice.backend == "nllb":
         from tfv.engine.mt.nllb import NLLBTranslator
 
-        translator: Translator = NLLBTranslator(model or "nllb-600m", device="cuda" if compute == "cuda" else "cpu", threads=threads)
-    elif backend == "llama":
-        translator = _local_llm(model or "qwen3.5-2b", compute, threads)
-    elif backend == "openai-compatible":
+        device = "cuda" if choice.device == "cuda" else "cpu"
+        translator: Translator = NLLBTranslator(choice.model, device=device, threads=threads)
+    elif choice.backend == "llama":
+        translator = _local_llm(choice.model, choice.device, threads)
+    elif choice.backend == "openai-compatible":
         from tfv.engine.mt.llm import LLMTranslator
 
-        if not url or not model:
-            raise ValueError("openai-compatible translation needs --mt-url and --mt-model")
-        translator = LLMTranslator(url, model=model, api_key=api_key or os.environ.get("TFV_LLM_API_KEY"))
+        if not url or not choice.model:
+            raise ValueError("an OpenAI-compatible server needs a URL and a model name (openai-compatible:<model>)")
+        translator = LLMTranslator(url, model=choice.model, api_key=api_key)
     else:
-        raise ValueError(f"unknown translation backend {backend!r}; choose from {', '.join(BACKENDS)}")
+        from tfv.engine.mt.cloud import create_cloud_translator
+
+        translator = create_cloud_translator(choice, api_key=api_key)
     try:
         translator.warmup(source, target)
     except Exception:
@@ -54,15 +51,12 @@ def create_translator(
     return translator
 
 
-def _local_llm(model_id: str, compute: str, threads: int | None) -> Translator:
+def _local_llm(model_id: str, device: str, threads: int | None) -> Translator:
     from tfv.engine.mt.llama_server import LlamaServer
     from tfv.engine.mt.llm import LLMTranslator
 
-    info = models.get(model_id)
-    if info.engine != "llama":
-        raise ValueError(f"{model_id} is not an LLM; pick one of: " + ", ".join(m.id for m in models.CATALOG.values() if m.engine == "llama"))
-    models.ensure(model_id)
-    server = LlamaServer(info.main_file, device="none" if compute == "cpu" else "auto", threads=threads)
+    info = models.ensure(model_id)
+    server = LlamaServer(info.main_file, device="none" if device == "cpu" else "auto", threads=threads)
     server.start()
     where = server.gpu.name if server.gpu else "CPU"
     return LLMTranslator(
@@ -70,4 +64,4 @@ def _local_llm(model_id: str, compute: str, threads: int | None) -> Translator:
     )
 
 
-__all__ = ["BACKENDS", "Context", "Translator", "create_translator"]
+__all__ = ["Context", "Translator", "create_translator"]

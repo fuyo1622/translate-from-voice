@@ -171,6 +171,12 @@ def _linux_gpus() -> list[GPU]:
     return gpus
 
 
+def nvidia_free_mb() -> int | None:
+    """Free memory on the first NVIDIA GPU right now (not cached), if there is one."""
+    rows = _nvidia_smi()
+    return rows[0][2] if rows else None
+
+
 def _nvidia_smi() -> list[tuple[str, int, int]]:
     exe = shutil.which("nvidia-smi")
     if not exe:

@@ -38,8 +38,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    from tfv.engine.asr import BACKENDS as ASR_BACKENDS
-    from tfv.engine.mt import BACKENDS as MT_BACKENDS
+    from tfv import keys
 
     p = argparse.ArgumentParser(prog="tfv", description="Live captions and translation for the audio this computer is playing.")
     p.add_argument("-v", "--verbose", action="count", default=0, help="show timings (-vv: debug logging)")
@@ -47,6 +46,15 @@ def _parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("devices", help="list output devices that can be captured")
     d.set_defaults(func=cmd_devices)
+
+    hw = sub.add_parser("hardware", help="show this machine, the chosen profile and which models fit")
+    hw.set_defaults(func=cmd_hardware)
+    hw.add_argument("--profile", default="auto", help="show another profile instead of the automatic choice")
+
+    k = sub.add_parser("keys", help="store API keys for paid services in the OS credential store")
+    k.set_defaults(func=cmd_keys)
+    k.add_argument("action", choices=("list", "set", "delete"))
+    k.add_argument("service", nargs="?", choices=tuple(keys.SERVICES))
 
     listen = sub.add_parser("listen", help="caption (and translate) what is playing, or a file")
     listen.set_defaults(func=cmd_listen)
@@ -58,15 +66,17 @@ def _parser() -> argparse.ArgumentParser:
     src.add_argument("--file", type=Path, help="use an audio/video file instead of live audio")
     src.add_argument("--realtime", action="store_true", help="with --file: feed the file at playback speed")
     src.add_argument("--duration", type=float, metavar="SECONDS", help="stop after this many seconds")
-    rec = listen.add_argument_group("recognition")
-    rec.add_argument("--asr", choices=ASR_BACKENDS, default="auto", help="recognizer (default: auto, based on hardware)")
-    rec.add_argument("--asr-model", help="Whisper size (e.g. large-v3-turbo, small) or a model directory")
-    rec.add_argument("--asr-compute", choices=("auto", "cuda", "cpu"), default="auto", help="where Whisper runs")
-    mt = listen.add_argument_group("translation")
-    mt.add_argument("--mt", choices=("auto", "none", *MT_BACKENDS), default="auto", help="translator (default: auto)")
-    mt.add_argument("--mt-model", help="catalog model id (see `tfv models`), or the server's model name with --mt-url")
-    mt.add_argument("--mt-compute", choices=("auto", "cuda", "cpu"), default="auto", help="where the translator runs")
-    mt.add_argument("--mt-url", help="base URL of an OpenAI-compatible server (e.g. http://localhost:11434 for Ollama)")
+    models_group = listen.add_argument_group(
+        "models", "By default the hardware profile picks the models (see `tfv hardware`); these override it."
+    )
+    models_group.add_argument("--profile", default="auto", help="hardware profile to use (default: auto)")
+    models_group.add_argument("--asr", default="auto", metavar="CHOICE", help="recognizer, e.g. whisper-small@cuda, sensevoice-small")
+    models_group.add_argument(
+        "--mt", default="auto", metavar="CHOICE",
+        help="translator, e.g. qwen3.5-2b@gpu, nllb-600m, deepl, claude, openai-compatible:MODEL, or none",
+    )  # fmt: skip
+    models_group.add_argument("--mt-url", help="server URL for openai-compatible (e.g. http://localhost:11434 for Ollama)")
+    models_group.add_argument("--no-adapt", action="store_true", help="never switch to lighter models while running")
     seg = listen.add_argument_group("segmentation")
     seg.add_argument("--vad-threshold", type=float, default=0.5, help="speech probability that starts an utterance")
     seg.add_argument("--min-silence-ms", type=int, default=500, help="pause that ends an utterance")
@@ -89,6 +99,55 @@ def cmd_devices(args) -> int:
         mark = "*" if dev["default"] else " "
         print(f"{mark} [{dev['index']:>2}] {dev['name']}  ({dev['rate']} Hz, {dev['channels']} ch)")
     print("\n* = current default output. Use --audio-device with the index or part of the name.")
+    return 0
+
+
+def cmd_hardware(args) -> int:
+    from tfv import hardware, keys, models, resources
+
+    hw = hardware.probe()
+    print(f"CPU:  {hw.cpu}, {hw.physical_cores} cores / {hw.logical_cores} threads")
+    print(f"RAM:  {hw.ram_mb / 1024:.1f} GB ({hw.ram_free_mb / 1024:.1f} GB free)")
+    for g in hw.gpus:
+        free = f", {g.free_mb:,} MB free" if g.free_mb is not None else ""
+        print(f"GPU:  {g.name} ({g.vram_mb:,} MB{free}){'  [integrated, not used]' if g.integrated else ''}")
+    if any(g.vendor == "nvidia" for g in hw.gpus):
+        print(f"CUDA: {'available' if hw.cuda else 'unavailable — ' + hw.cuda_note}")
+    if hw.on_battery:
+        print("Power: on battery")
+    profile = resources.choose_profile(hw, args.profile)
+    print(f"\nProfile: {profile.name} — {profile.summary}")
+    print("Each stage uses the first option that fits; lower ones are fallbacks.")
+    for title, rungs in (("Recognition", profile.asr), ("Translation", profile.mt)):
+        print(f"\n{title}:")
+        for choice in rungs:
+            reason = resources.unfit_reason(choice, hw, keys.has)
+            info = models.CATALOG.get(choice.model or "")
+            size = f"{info.size_mb:>6,} MB" if info else " " * 9
+            state = "installed" if info and models.is_installed(info.id) else ""
+            print(f"  {'✗' if reason else '✓'} {str(choice):<32}{size}  {state:<10}{reason or ''}")
+    return 0
+
+
+def cmd_keys(args) -> int:
+    import getpass
+
+    from tfv import keys
+
+    if args.action == "list":
+        for service, env in keys.SERVICES.items():
+            print(f"{service:<9} {'set' if keys.has(service) else 'not set':<8} (or set {env})")
+        return 0
+    if not args.service:
+        raise ValueError(f"name the service to {args.action}")
+    if args.action == "set":
+        key = getpass.getpass(f"{args.service} API key (input hidden): ")
+        if not key.strip():
+            raise ValueError("no key entered")
+        keys.store(args.service, key)
+        print(f"Stored the {args.service} key in the system credential store.")
+    else:
+        print("Deleted." if keys.delete(args.service) else "No stored key.")
     return 0
 
 
@@ -136,9 +195,8 @@ def cmd_listen(args) -> int:
     config = SessionConfig(
         source_lang=args.source_lang, target_lang=args.target_lang,
         audio_device=args.audio_device, file=args.file, realtime=args.realtime,
-        asr=args.asr, asr_model=args.asr_model, asr_compute=args.asr_compute,
-        mt=args.mt, mt_model=args.mt_model, mt_compute=args.mt_compute, mt_url=args.mt_url,
-        threads=args.threads,
+        profile=args.profile, asr=args.asr, mt=args.mt, mt_url=args.mt_url,
+        threads=args.threads, adapt=not args.no_adapt,
         segmenter=SegmenterConfig(threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s),
     )  # fmt: skip
     logfile = open(args.log, "a", encoding="utf-8") if args.log else None

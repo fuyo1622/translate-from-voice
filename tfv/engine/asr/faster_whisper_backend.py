@@ -59,3 +59,6 @@ class FasterWhisperBackend(ASRBackend):
         segments, _ = self._model.transcribe(audio, **self._options)
         text = "".join(s.text for s in segments).strip()
         return ASRResult(text=text, language=self._language, compute_s=time.perf_counter() - t0)
+
+    def close(self) -> None:
+        self._model = None  # CTranslate2 frees the weights and VRAM with the last reference

@@ -28,3 +28,6 @@ class ASRBackend(ABC):
         """Run once so lazy library loading and kernel setup happen before real audio."""
         rng = np.random.default_rng(0)
         self.transcribe((rng.standard_normal(SAMPLE_RATE) * 0.01).astype(np.float32))
+
+    def close(self) -> None:
+        """Release the model (and its GPU memory)."""

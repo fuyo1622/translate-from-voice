@@ -43,3 +43,6 @@ class NLLBTranslator(Translator):
         output = result[0].hypotheses[0][1:]  # drop the target language tag
         ids = [self._tokenizer.token_to_id(t) for t in output]
         return self._tokenizer.decode([i for i in ids if i is not None], skip_special_tokens=True).strip()
+
+    def close(self) -> None:
+        self._translator = None

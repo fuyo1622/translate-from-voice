@@ -19,6 +19,8 @@ dependencies = [
     "opencc>=1.1.9",
     "httpx>=0.27",
     "psutil>=5.9",
+    "pyyaml>=6",
+    "keyring>=24",
     "PyAudioWPatch>=0.2.12; sys_platform == 'win32'",
 ]
 
@@ -38,6 +40,9 @@ tfv = "tfv.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["tfv*"]
+
+[tool.setuptools.package-data]
+tfv = ["profiles.yaml", "assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
