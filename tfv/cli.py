@@ -207,7 +207,11 @@ def cmd_hardware(args) -> int:
     profile = resources.choose_profile(hw, args.profile)
     print(f"\nProfile: {profile.name} — {profile.summary}")
     print("Each stage uses the first option that fits; lower ones are fallbacks.")
-    for title, rungs in (("Recognition", profile.asr), ("Translation", profile.mt)):
+    ladders = [("Recognition", profile.asr)]
+    ladders += [(f"Recognition when {lang} is spoken", r) for lang, r in profile.asr_by_lang.items()]
+    ladders += [("Translation", profile.mt)]
+    ladders += [(f"Translation into {lang}", r) for lang, r in profile.mt_by_lang.items()]
+    for title, rungs in ladders:
         print(f"\n{title}:")
         for choice in rungs:
             reason = resources.unfit_reason(choice, hw, keys.has)

@@ -115,8 +115,10 @@ class SettingsDialog(QDialog):
         for p in profiles:
             self.profile.addItem(f"{p.name} — {p.summary}", p.name)
         _select(self.profile, self.prefs.profile)
-        asr_options = dict.fromkeys(str(c) for p in profiles for c in p.asr)
-        mt_options = dict.fromkeys(str(c) for p in profiles for c in p.mt)
+        asr_ladders = [r for p in profiles for r in (p.asr, *p.asr_by_lang.values())]
+        mt_ladders = [r for p in profiles for r in (p.mt, *p.mt_by_lang.values())]
+        asr_options = dict.fromkeys(str(c) for ladder in asr_ladders for c in ladder)
+        mt_options = dict.fromkeys(str(c) for ladder in mt_ladders for c in ladder)
         self.asr = _choice_combo(["auto", *asr_options, *_CLOUD_ASR], self.prefs.asr)
         self.mt = _choice_combo(["auto", "none", *mt_options, *_CLOUD_MT], self.prefs.mt)
         self.mt_url = QLineEdit(self.prefs.mt_url)

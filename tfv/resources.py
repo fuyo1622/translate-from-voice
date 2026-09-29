@@ -20,7 +20,7 @@ from typing import Callable, Generic, TypeVar
 
 import numpy as np
 
-from tfv import hardware, models
+from tfv import hardware, languages, models
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +64,16 @@ class Profile:
     asr: list[Choice]
     mt: list[Choice]
     auto: bool = True
+    asr_by_lang: dict[str, list[Choice]] = field(default_factory=dict)
+    """Ladders for a particular spoken language (profiles.yaml keys asr_zh, asr_en, asr_ja)."""
+    mt_by_lang: dict[str, list[Choice]] = field(default_factory=dict)
+    """Ladders for a particular target language (keys mt_zh, mt_en, mt_ja)."""
+
+    def asr_for(self, source_lang: str) -> list[Choice]:
+        return self.asr_by_lang.get(source_lang, self.asr)
+
+    def mt_for(self, target_lang: str | None) -> list[Choice]:
+        return self.mt_by_lang.get(target_lang or "", self.mt)
 
     def matches(self, hw: hardware.Hardware) -> bool:
         gpu = hw.gpu
@@ -86,10 +96,16 @@ def load_profiles(path: Path | None = None) -> list[Profile]:
     import yaml
 
     text = Path(path).read_text("utf-8") if path else package_files.files("tfv").joinpath("profiles.yaml").read_text("utf-8")
+
+    def ladder(items) -> list[Choice]:
+        return [Choice.parse(c) for c in items]
+
     return [
         Profile(
             name=p["name"], summary=p.get("summary", ""), when=p.get("when") or {},
-            asr=[Choice.parse(c) for c in p["asr"]], mt=[Choice.parse(c) for c in p["mt"]], auto=p.get("auto", True),
+            asr=ladder(p["asr"]), mt=ladder(p["mt"]), auto=p.get("auto", True),
+            asr_by_lang={lang: ladder(p[f"asr_{lang}"]) for lang in languages.SUPPORTED if f"asr_{lang}" in p},
+            mt_by_lang={lang: ladder(p[f"mt_{lang}"]) for lang in languages.SUPPORTED if f"mt_{lang}" in p},
         )  # fmt: skip
         for p in yaml.safe_load(text)["profiles"]
     ]
@@ -137,9 +153,14 @@ def unfit_reason(choice: Choice, hw: hardware.Hardware, has_key: Callable[[str],
             return f"no GPU runtime ({exc})"
         if gpu is None:
             return "no discrete GPU"
-        need = size + 400  # weights + 4k context + compute buffers
-        if gpu.free_mib - VRAM_MARGIN_MB < need:
-            return f"needs ~{need} MB VRAM, {gpu.free_mib} MB free on {gpu.name}"
+        free = gpu.free_mib
+        if "nvidia" in gpu.name.lower():
+            # Vulkan's figure misses what CUDA (Whisper) holds; nvidia-smi sees all of it.
+            # Overcommitting makes Windows page VRAM and everything becomes 10x slower.
+            free = hardware.nvidia_free_mb() or free
+        need = size + 300  # weights + 4k context + compute buffers (measured +60..230 MB, EVAL.md)
+        if free - VRAM_MARGIN_MB < need:
+            return f"needs ~{need} MB VRAM, {free} MB free on {gpu.name}"
     else:  # cpu
         import psutil
 
@@ -277,7 +298,7 @@ class Monitor:
         self._cooldown = cooldown
         self._stop = threading.Event()
         self._last_change = time.monotonic()
-        self._dropped = (0, 0)
+        self._dropped = (0, 0, 0)
         self._thread = threading.Thread(target=self._run, name="tfv-monitor", daemon=True)
 
     def start(self) -> None:
@@ -295,14 +316,16 @@ class Monitor:
 
     def check(self) -> None:
         stats = self._pipeline.stats()
-        dropped = (stats["dropped_utterances"], stats["dropped_translations"])
-        new_asr_drops, new_mt_drops = (dropped[0] - self._dropped[0], dropped[1] - self._dropped[1])
-        self._dropped = dropped
+        counts = (stats["dropped_utterances"], stats["dropped_translations"], stats.get("failed_translations", 0))
+        new_asr_drops, new_mt_drops, new_mt_failures = (now - before for now, before in zip(counts, self._dropped))
+        self._dropped = counts
         if time.monotonic() - self._last_change < self._cooldown:
             return
         stage, reason = None, ""
         if new_asr_drops or (stats["captions"] >= 4 and stats["asr_rtf"] > 0.7):
             stage, reason = "asr", f"recognition at {stats['asr_rtf']:.2f}x real time, {new_asr_drops} skipped"
+        elif new_mt_failures >= 3:
+            stage, reason = "mt", f"{new_mt_failures} translations failed"
         elif new_mt_drops or (stats["translated"] >= 3 and stats["mt_s"] > 4.0):
             stage, reason = "mt", f"translation takes {stats['mt_s']:.1f}s per line, {new_mt_drops} skipped"
         if stage and self._step_down(stage, reason):

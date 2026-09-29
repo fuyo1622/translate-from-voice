@@ -130,8 +130,10 @@ class LlamaServer:
         ctx_size: int = 4096,
         threads: int | None = None,
         vram_margin_mib: int = 512,
+        extra_args: list[str] | None = None,
     ):
         self.model_path = Path(model_path)
+        self.extra_args = extra_args or []
         self.variant = variant or default_variant()
         self.device = device
         """"auto" (best GPU), "none" (CPU only), or a llama.cpp device id like "Vulkan1"."""
@@ -142,7 +144,7 @@ class LlamaServer:
         # llama-server accepts requests from any local program or web page unless it has a key
         self.api_key = secrets.token_urlsafe(24)
         self._proc: subprocess.Popen | None = None
-        self._log: collections.deque[str] = collections.deque(maxlen=60)
+        self._log: collections.deque[str] = collections.deque(maxlen=200)
         self.gpu: GpuDevice | None = None
 
     @property
@@ -158,6 +160,7 @@ class LlamaServer:
             self.gpu = best_device(list_devices(exe)) if not self.variant.endswith("cpu") else None
             device = self.gpu.id if self.gpu else "none"
         self.port = _free_port()
+        self._log.clear()
         cmd = [
             str(exe), "-m", str(self.model_path),
             "--host", "127.0.0.1", "--port", str(self.port),
@@ -165,6 +168,11 @@ class LlamaServer:
             "--no-webui", "--reasoning", "off", "--offline",
             "--api-key", self.api_key,
             "-dev", device,
+            # Captions are short, independent requests: skip the RAM prompt cache (8 GB by
+            # default) and keep few checkpoints. Hybrid models such as Qwen3.5 store large
+            # states there, and a failed allocation crashes the server on 16 GB machines.
+            "--cache-ram", "0", "--ctx-checkpoints", "4",
+            *self.extra_args,
         ]  # fmt: skip
         if device != "none":
             cmd += ["--fit", "on", "--fit-target", str(self.vram_margin_mib)]
@@ -176,7 +184,7 @@ class LlamaServer:
             creationflags=_NO_WINDOW,
         )  # fmt: skip
         _kill_with_parent(self._proc)
-        threading.Thread(target=self._read_log, name="tfv-llama-log", daemon=True).start()
+        threading.Thread(target=self._read_log, args=(self._proc,), name="tfv-llama-log", daemon=True).start()
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -192,6 +200,18 @@ class LlamaServer:
         self.stop()
         raise RuntimeError(f"llama-server did not become ready within {timeout:.0f}s")
 
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def log_tail(self, lines: int = 15) -> str:
+        return "\n".join(list(self._log)[-lines:])
+
+    def restart(self) -> None:
+        """Start again (on a new port) after the process died."""
+        self.stop()
+        self.start()
+
     def stop(self) -> None:
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
@@ -201,11 +221,21 @@ class LlamaServer:
                 self._proc.kill()
         self._proc = None
 
-    def _read_log(self) -> None:
-        proc = self._proc
-        assert proc and proc.stdout
-        for line in proc.stdout:
-            self._log.append(line.rstrip())
+    def _read_log(self, proc: subprocess.Popen) -> None:
+        """Keep the recent output in memory and all of it in llama-server.log, for crash reports."""
+        path = models.models_dir().parent / "llama-server.log"
+        try:
+            if path.exists() and path.stat().st_size > 5_000_000:
+                path.replace(path.with_name("llama-server.old.log"))
+            sink = open(path, "a", encoding="utf-8")
+        except OSError:
+            sink = None
+        with sink or open(os.devnull, "w", encoding="utf-8") as out:
+            out.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} {self.model_path.name} ====\n")
+            for line in proc.stdout:
+                self._log.append(line.rstrip())
+                out.write(line)
+                out.flush()
 
 
 def _free_port() -> int:

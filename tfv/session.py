@@ -135,10 +135,22 @@ class Session:
     def set_languages(self, source_lang: str, target_lang: str | None) -> None:
         """Switch languages while running (reloads the recognizer if the spoken language changed)."""
         with self._swap_lock:
-            cfg, p = self.config, self.pipeline
-            old_source = cfg.source_lang
+            cfg, p, profile = self.config, self.pipeline, self.profile
+            old_source, old_target = cfg.source_lang, cfg.target_lang
             cfg.source_lang, cfg.target_lang = source_lang, target_lang  # ladders read these when loading
-            if source_lang != old_source:
+            new_asr_ladder = cfg.asr == "auto" and profile.asr_for(source_lang) != profile.asr_for(old_source)
+            new_mt_ladder = cfg.mt == "auto" and profile.mt_for(target_lang) != profile.mt_for(old_target)
+            if new_asr_ladder:
+                # Another recognizer suits this language (e.g. SenseVoice on the CPU so the GPU can
+                # hold a larger translator): free the translator first so both are sized together.
+                self._status(f"Loading recognition for {source_lang}…")
+                _close(p.replace_translator(None))
+                self.translator, self.mt_ladder = None, None
+                self.asr_ladder = self._asr_ladder()
+                new_asr = self.asr_ladder.load()
+                _close(p.replace_asr(new_asr, source_lang))
+                self.asr = new_asr
+            elif source_lang != old_source:
                 self._status(f"Switching recognition to {source_lang}…")
                 try:
                     self.asr.set_language(source_lang)  # same model, no reload
@@ -151,8 +163,10 @@ class Session:
                 _close(p.replace_translator(None))
                 p.set_target(target_lang)
                 self.translator, self.mt_ladder = None, None
-            elif self.translator is None:
+            elif self.translator is None or new_mt_ladder:
                 self._status("Loading translation…")
+                _close(p.replace_translator(None))  # free its memory before loading the next one
+                self.translator = None
                 self.mt_ladder = self._mt_ladder()
                 self.translator = self.mt_ladder.load()
                 p.replace_translator(self.translator, target_lang)
@@ -177,7 +191,7 @@ class Session:
         from tfv.engine.asr import create_asr
 
         cfg, hw = self.config, self.hardware
-        rungs = self.profile.asr if cfg.asr == "auto" else [Choice.parse(cfg.asr)]
+        rungs = self.profile.asr_for(cfg.source_lang) if cfg.asr == "auto" else [Choice.parse(cfg.asr)]
         return Ladder(
             "recognition", rungs,
             build=lambda c: create_asr(c, language=cfg.source_lang, threads=cfg.threads, api_key=keys.get(c.backend)),
@@ -189,7 +203,7 @@ class Session:
         from tfv.engine.mt import create_translator
 
         cfg, hw = self.config, self.hardware
-        rungs = self.profile.mt if cfg.mt == "auto" else [Choice.parse(cfg.mt)]
+        rungs = self.profile.mt_for(cfg.target_lang) if cfg.mt == "auto" else [Choice.parse(cfg.mt)]
         return Ladder(
             "translation", rungs,
             build=lambda c: create_translator(

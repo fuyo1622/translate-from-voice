@@ -56,7 +56,10 @@ def _local_llm(model_id: str, device: str, threads: int | None) -> Translator:
     from tfv.engine.mt.llm import LLMTranslator
 
     info = models.ensure(model_id)
-    server = LlamaServer(info.main_file, device="none" if device == "cpu" else "auto", threads=threads)
+    # TranslateGemma's template rejects ordinary chat messages, which llama-server tries at
+    # startup; we send its exact prompt ourselves, so a plain built-in template is enough.
+    extra = ["--no-jinja", "--chat-template", "gemma"] if info.prompt == "translategemma" else []
+    server = LlamaServer(info.main_file, device="none" if device == "cpu" else "auto", threads=threads, extra_args=extra)
     server.start()
     where = server.gpu.name if server.gpu else "CPU"
     return LLMTranslator(

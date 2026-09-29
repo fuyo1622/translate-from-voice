@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 from tfv.engine.mt.base import Context, Translator
 from tfv.languages import NAMES
@@ -94,11 +95,13 @@ class LLMTranslator(Translator):
     ):
         import httpx
 
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self._http = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout, transport=transport)
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._timeout, self._transport = timeout, transport
+        self._http = httpx.Client(base_url=base_url.rstrip("/"), headers=self._headers, timeout=timeout, transport=transport)
         self._model = model
         self._prompt = prompt
         self._server = server  # a LlamaServer we own and must stop
+        self._restarts: list[float] = []
         self.uses_context = prompt == "chat"
         self.description = description or f"{model} via {base_url}"
 
@@ -116,16 +119,44 @@ class LLMTranslator(Translator):
         body = {"model": self._model, "messages": messages, "temperature": 0, "max_tokens": max_tokens}
         if self._server is not None:
             body["chat_template_kwargs"] = {"enable_thinking": False}
-        r = self._http.post("/v1/chat/completions", json=body)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"].get("content") or ""
+        return self._post("/v1/chat/completions", body)["choices"][0]["message"].get("content") or ""
 
     def _complete(self, prompt: str, max_tokens: int, stop: list[str]) -> str:
         """llama-server's raw completion endpoint, for models with a fixed prompt format."""
         body = {"prompt": prompt, "n_predict": max_tokens, "temperature": 0, "stop": stop, "cache_prompt": True}
-        r = self._http.post("/completion", json=body)
+        return self._post("/completion", body).get("content", "")
+
+    def _post(self, path: str, body: dict) -> dict:
+        import httpx
+
+        try:
+            r = self._http.post(path, json=body)
+        except httpx.TransportError:
+            if not self._restart_dead_server():
+                raise
+            r = self._http.post(path, json=body)  # one retry on the restarted server
         r.raise_for_status()
-        return r.json().get("content", "")
+        return r.json()
+
+    def _restart_dead_server(self) -> bool:
+        """If our llama-server crashed, start it again (at most 3 times in 10 minutes)."""
+        import httpx
+
+        server = self._server
+        if server is None or server.alive:
+            return False
+        now = time.monotonic()
+        self._restarts = [t for t in self._restarts if now - t < 600]
+        log.warning("llama-server stopped unexpectedly; last output:\n%s", server.log_tail())
+        if len(self._restarts) >= 3:
+            log.error("llama-server keeps crashing; not restarting it again")
+            return False
+        self._restarts.append(now)
+        server.restart()
+        self._http.close()
+        self._http = httpx.Client(base_url=server.url, headers=self._headers, timeout=self._timeout, transport=self._transport)
+        log.info("llama-server restarted")
+        return True
 
     def close(self) -> None:
         self._http.close()

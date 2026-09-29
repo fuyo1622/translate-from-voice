@@ -45,6 +45,17 @@ def test_profile_selection(hw, expected):
     assert choose_profile(hw).name == expected
 
 
+def test_per_language_ladders():
+    small = choose_profile(machine(GPU("RTX 3050 Laptop", "nvidia", 4096), cuda=True))
+    assert small.asr_for("en")[0] == Choice.parse("whisper-large-v3-turbo@cuda")
+    assert small.asr_for("ja")[0] == Choice.parse("sensevoice-small@cpu")  # frees the GPU for a 4B translator
+    assert small.mt_for("zh")[0] == Choice.parse("translategemma-4b@gpu")
+    assert small.mt_for("en")[0] == Choice.parse("qwen3.5-4b@gpu")
+    assert small.mt_for(None) == small.mt
+    cpu = choose_profile(machine(ram_mb=8000))
+    assert cpu.asr_for("ja") == cpu.asr and cpu.mt_for("zh") == cpu.mt  # no overrides: the defaults
+
+
 def test_cloud_profile_is_never_automatic():
     assert choose_profile(machine(), "cloud").name == "cloud"
     assert all(p.name != "cloud" for p in load_profiles() if p.auto)
@@ -100,7 +111,9 @@ def test_step_down():
 
 class FakePipeline:
     def __init__(self, **stats):
-        self.s = dict(captions=0, translated=0, asr_rtf=0.1, mt_s=0.5, dropped_utterances=0, dropped_translations=0)
+        self.s = dict(
+            captions=0, translated=0, asr_rtf=0.1, mt_s=0.5, dropped_utterances=0, dropped_translations=0, failed_translations=0
+        )
         self.s.update(stats)
         self.resets = 0
 
@@ -120,6 +133,18 @@ def test_monitor_steps_down_slow_translation_once_per_cooldown():
     m._cooldown = 60
     m.check()
     assert calls == ["mt"]
+
+
+def test_monitor_steps_down_a_failing_translator():
+    calls = []
+    p = FakePipeline()
+    m = Monitor(p, lambda stage, reason: calls.append((stage, reason)) or True, cooldown=0)
+    p.s["failed_translations"] = 2
+    m.check()
+    assert calls == []  # a couple of failures can be a restart
+    p.s["failed_translations"] = 6
+    m.check()
+    assert calls == [("mt", "4 translations failed")]
 
 
 def test_monitor_reacts_to_dropped_utterances():

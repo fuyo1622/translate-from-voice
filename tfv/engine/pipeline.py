@@ -98,6 +98,7 @@ class Pipeline:
         self._threads: list[threading.Thread] = []
         self.dropped_utterances = 0
         self.dropped_translations = 0
+        self.failed_translations = 0
 
     # -- control -------------------------------------------------------------
 
@@ -172,6 +173,7 @@ class Pipeline:
             "backlog": self._utterances.qsize() + self._to_translate.qsize(),
             "dropped_utterances": self.dropped_utterances,
             "dropped_translations": self.dropped_translations,
+            "failed_translations": self.failed_translations,
         }
 
     def reset_stats(self) -> None:
@@ -262,6 +264,7 @@ class Pipeline:
                 translation = translator.translate(caption.text, caption.source_lang, target, context)
             except Exception as exc:
                 log.warning("Translation failed: %s", exc)
+                self.failed_translations += 1
                 translation = ""
             caption.mt_s = time.perf_counter() - t0
             text = self._postprocess(translation, target) if translation else None
