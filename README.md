@@ -89,12 +89,19 @@ recognition or translation falls behind.
 
 | Profile | When | Recognition | Translation |
 |---|---|---|---|
-| gpu-high | NVIDIA ≥ 16 GB | Whisper large-v3 | TranslateGemma 12B → Qwen3.5 9B → … |
-| gpu-mid | NVIDIA 8–12 GB | Whisper large-v3-turbo | Qwen3.5 9B → 4B → 2B |
-| gpu-small | NVIDIA 4–6 GB | Whisper large-v3-turbo | Qwen3.5 4B → 2B (GPU) → 2B (CPU) → NLLB |
-| vulkan-gpu | AMD / Intel Arc / NVIDIA without CUDA | SenseVoice (CPU) | Qwen3.5 4B/2B via Vulkan → NLLB |
-| apple | Apple Silicon | SenseVoice (CPU) | Qwen3.5 via Metal → NLLB |
+| gpu-high | NVIDIA ≥ 16 GB | Whisper large-v3 | Qwen3.5 9B / TranslateGemma 12B → … |
+| gpu-mid | NVIDIA 8–12 GB | Whisper large-v3-turbo | Qwen3.5 9B / TranslateGemma 12B → 4B → 2B |
+| gpu-small | NVIDIA 4–6 GB | English: Whisper turbo (GPU); Chinese/Japanese: SenseVoice (CPU) | into Chinese: TranslateGemma 4B; into English/Japanese: Qwen3.5 4B; → Qwen3.5 2B → NLLB |
+| vulkan-gpu | AMD / Intel Arc / NVIDIA without CUDA | SenseVoice (CPU) | same 4B choices via Vulkan → 2B → NLLB |
+| apple | Apple Silicon | SenseVoice (CPU) | same 4B choices via Metal → 2B → NLLB |
 | cpu-high / cpu-low | no usable GPU | SenseVoice (CPU) | Qwen3.5 2B (CPU) / NLLB |
+
+On a 4 GB GPU, Whisper and a 4B translator don't fit together, so for
+Chinese and Japanese speech the app recognizes on the CPU (nearly as
+accurate) and gives the GPU to the better translator; for English speech,
+where Whisper is much better in noise, it keeps Whisper and a 2B translator.
+The measurements are in [EVAL.md](EVAL.md). A 4B model runs only if it fits in
+the VRAM actually free, so a GPU-heavy game or video player can push it down to 2B.
 | cloud | only when chosen | OpenAI / Deepgram | DeepL / Claude / OpenAI |
 
 Local LLM translation runs in llama.cpp's `llama-server` (downloaded
