@@ -290,20 +290,19 @@ def cmd_listen(args) -> int:
     print_lock = threading.Lock()
 
     def show(c: Caption) -> None:
+        if c.stage == "text" and c.target_lang is not None:
+            return  # printed together with its translation
         stamp = f"[{int(c.start // 60):02d}:{c.start % 60:04.1f}]"
-        if c.stage == "text":
-            cont = "…" if c.forced else " "  # cut mid-speech; the sentence continues on the next line
-            line = f"{stamp}{cont} {c.text}"
-            if args.verbose:
-                line += f"   ({c.duration:.1f}s audio, asr {c.asr_s:.2f}s, waited {c.waited_s:.2f}s)"
-        elif c.stage == "translated":
-            line = f"{stamp} → {c.translation}"
+        cont = "…" if c.forced else " "  # cut mid-speech; the sentence continues on the next line
+        line = f"{stamp}{cont} {c.text}"
+        if args.verbose:
+            line += f"   ({c.duration:.1f}s audio, asr {c.asr_s:.2f}s, waited {c.waited_s:.2f}s)"
+        if c.stage == "translated":
+            line += f"\n{' ' * len(stamp)}  → {c.translation}"
             if args.verbose:
                 line += f"   (mt {c.mt_s:.2f}s)"
-        elif args.verbose:
-            line = f"{stamp} → (not translated)"
-        else:
-            return
+        elif c.stage == "untranslated" and args.verbose:
+            line += f"\n{' ' * len(stamp)}  → (not translated)"
         with print_lock:
             print(line, flush=True)
             if logfile:

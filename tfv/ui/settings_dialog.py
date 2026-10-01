@@ -182,6 +182,8 @@ class SettingsDialog(QDialog):
         self.clear_after = _spin(2, 60, self.prefs.clear_after_s, " s")
         self.show_original = QCheckBox("Show the original text above the translation")
         self.show_original.setChecked(self.prefs.show_original)
+        self.show_together = QCheckBox("Show the original and its translation at the same time")
+        self.show_together.setChecked(self.prefs.show_together)
         self.locked = QCheckBox("Lock the overlay (clicks pass through to the window below)")
         self.locked.setChecked(self.prefs.locked)
         form.addRow("Text size:", self.font_size)
@@ -189,6 +191,7 @@ class SettingsDialog(QDialog):
         form.addRow("Captions on screen:", self.lines)
         form.addRow("Clear after silence:", self.clear_after)
         form.addRow("", self.show_original)
+        form.addRow("", self.show_together)
         form.addRow("", self.locked)
         return w
 
@@ -227,6 +230,7 @@ class SettingsDialog(QDialog):
         p.lines = self.lines.value()
         p.clear_after_s = self.clear_after.value()
         p.show_original = self.show_original.isChecked()
+        p.show_together = self.show_together.isChecked()
         p.locked = self.locked.isChecked()
         source, target = self.source.currentData(), self.target.currentData()
         if p.engine_key() != before_engine:

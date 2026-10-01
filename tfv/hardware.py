@@ -171,6 +171,25 @@ def _linux_gpus() -> list[GPU]:
     return gpus
 
 
+def commit_free_mb() -> int | None:
+    """Windows: memory that can still be committed (RAM + page file). GPU allocations count
+    against it too, so when it runs out they fail even on an empty GPU. None elsewhere."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + [
+            (name, ctypes.c_ulonglong)
+            for name in ("total_phys", "avail_phys", "total_commit", "avail_commit", "total_virtual", "avail_virtual", "avail_ext")
+        ]
+
+    status = MemoryStatus(dwLength=ctypes.sizeof(MemoryStatus))
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return status.avail_commit // 2**20
+
+
 def nvidia_free_mb() -> int | None:
     """Free memory on the first NVIDIA GPU right now (not cached), if there is one."""
     rows = _nvidia_smi()

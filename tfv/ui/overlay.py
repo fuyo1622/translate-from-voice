@@ -85,6 +85,8 @@ class OverlayWindow(QWidget):
     # -- public ------------------------------------------------------------------
 
     def show_caption(self, caption: Caption) -> None:
+        if self.prefs.show_together and caption.target_lang is not None and caption.stage == "text":
+            return  # shown together with its translation (or alone if translation fails)
         row = self._rows.get(caption.id)
         if row is None:
             row = _Row(self)

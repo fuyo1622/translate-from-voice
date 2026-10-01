@@ -137,6 +137,12 @@ def unfit_reason(choice: Choice, hw: hardware.Hardware, has_key: Callable[[str],
         return None if has_key(choice.backend) else f"no API key for {choice.backend}"
     info = models.CATALOG.get(choice.model or "")
     size = info.size_mb if info else 1600
+    commit = hardware.commit_free_mb()
+    if commit is not None and commit < size + 1000:
+        return (
+            f"Windows is low on memory ({commit} MB left of RAM + page file, ~{size + 1000} MB needed); "
+            "close programs or free disk space on C: so the page file can grow"
+        )
     if choice.device == "cuda":
         if not hw.cuda:
             return f"CUDA unavailable ({hw.cuda_note or 'no NVIDIA GPU'})"

@@ -30,6 +30,8 @@ class Prefs:
     adapt: bool = True
     # overlay
     show_original: bool = True
+    show_together: bool = True
+    """Hold the original until its translation is ready, so both lines appear at the same time."""
     font_size: int = 22
     opacity: float = 0.55
     """Background panel opacity (the text stays opaque)."""
