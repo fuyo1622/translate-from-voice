@@ -187,7 +187,30 @@ def commit_free_mb() -> int | None:
     status = MemoryStatus(dwLength=ctypes.sizeof(MemoryStatus))
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
         return None
-    return status.avail_commit // 2**20
+    free = status.avail_commit // 2**20
+    if drive := _managed_pagefile_drive():
+        # Windows grows a system-managed page file on demand while the disk has room
+        free += max(0, shutil.disk_usage(drive).free // 2**20 - 2048)
+    return free
+
+
+def _managed_pagefile_drive() -> str | None:
+    """Drive of a page file whose size Windows manages, if any."""
+    import winreg
+
+    try:
+        key = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+            files = winreg.QueryValueEx(k, "PagingFiles")[0]
+    except OSError:
+        return None
+    for entry in files:  # "?:\pagefile.sys" = fully automatic; "C:\pagefile.sys 0 0" = system managed size
+        path, *sizes = entry.split()
+        if path.startswith("?:"):
+            return os.environ.get("SystemDrive", "C:") + "\\"
+        if sizes in ([], ["0", "0"]):
+            return path[:3]
+    return None
 
 
 def nvidia_free_mb() -> int | None:

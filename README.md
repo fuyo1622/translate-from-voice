@@ -27,7 +27,8 @@ Leave out `[nvidia]` on computers without an NVIDIA GPU; it adds the CUDA
 libraries (~1.3 GB) that Whisper needs on the GPU. With the CUDA 12 toolkit
 already installed, `pip install -e . nvidia-cudnn-cu12==9.10.2.21` is enough.
 
-Models download on first use to `%LOCALAPPDATA%\tfv\models`
+Models download on first use to the `models` folder inside the project
+(next to `tfv.exe` in a packaged build)
 (`TFV_MODELS_DIR` changes it). On a machine like the development laptop
 (RTX 3050 4 GB) the first start downloads about 3 GB.
 

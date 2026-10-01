@@ -107,15 +107,14 @@ CATALOG: dict[str, ModelInfo] = {
 
 
 def models_dir() -> Path:
-    """Model cache: $TFV_MODELS_DIR, else the per-user app data directory."""
+    """Model folder: $TFV_MODELS_DIR, else `models` inside the app folder (the project
+    checkout, or next to tfv.exe in a packaged build), so everything stays in one place."""
     if env := os.environ.get("TFV_MODELS_DIR"):
         base = Path(env)
-    elif sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "tfv" / "models"
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "tfv" / "models"
+    elif getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent / "models"
     else:
-        base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "tfv" / "models"
+        base = Path(__file__).resolve().parent.parent / "models"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
