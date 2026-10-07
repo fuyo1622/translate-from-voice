@@ -101,6 +101,12 @@ class GpuDevice:
         # Intel's Iris/UHD iGPUs report shared system RAM as their memory
         return "intel" in self.name.lower() and "arc" not in self.name.lower()
 
+    @property
+    def software(self) -> bool:
+        """Vulkan run on the CPU (Mesa's llvmpipe, SwiftShader): slower than llama.cpp's own CPU code,
+        and it reports all of the RAM as free memory, so it would otherwise win over a real GPU."""
+        return any(s in self.name.lower() for s in ("llvmpipe", "lavapipe", "swiftshader"))
+
 
 def list_devices(exe: Path) -> list[GpuDevice]:
     out = subprocess.run(
@@ -111,8 +117,8 @@ def list_devices(exe: Path) -> list[GpuDevice]:
 
 
 def best_device(devices: list[GpuDevice]) -> GpuDevice | None:
-    """The discrete GPU with the most free memory; integrated GPUs only as a last resort."""
-    discrete = [d for d in devices if not d.integrated]
+    """The discrete GPU with the most free memory, or None (integrated and software devices don't count)."""
+    discrete = [d for d in devices if not d.integrated and not d.software]
     return max(discrete, key=lambda d: d.free_mib, default=None)
 
 

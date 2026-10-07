@@ -73,5 +73,6 @@ def cuda_status() -> tuple[bool, str]:
             except OSError:
                 missing.append(name)
         if missing:
-            return False, f"missing {', '.join(missing)} (install with: pip install -e .[nvidia])"
+            fix = "use a build made with TFV_NVIDIA=1" if getattr(sys, "frozen", False) else "install with: pip install -e .[nvidia]"
+            return False, f"missing {', '.join(missing)} ({fix})"
     return True, "ok"

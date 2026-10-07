@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from tfv.session import Session, SessionConfig
 from tfv.ui.prefs import Prefs
 
-# Session and remote.RemoteSession share: start, stop, pause, resume, set_languages, describe, stats.
+# Session and remote.RemoteSession share: start, stop, pause, resume, set_languages, set_partials, describe, stats.
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +56,8 @@ class EngineController(QObject):
         p = self.prefs
         config = SessionConfig(
             source_lang=p.source_lang, target_lang=p.target_lang, capture=p.capture, audio_device=p.audio_device,
-            profile=p.profile, asr=p.asr, mt=p.mt, mt_url=p.mt_url or None, adapt=p.adapt,
+            profile=p.profile, asr=p.asr, mt=p.mt, mt_url=p.mt_url or None, adapt=p.adapt, partials=p.live_text,
+            vad_denoise=p.vad_denoise,
         )  # fmt: skip
         def on_caption(caption) -> None:
             self._on_caption(caption, generation)
@@ -126,6 +127,15 @@ class EngineController(QObject):
                     self.status.emit(f"Could not switch languages: {exc}")
 
         threading.Thread(target=work, name="tfv-languages", daemon=True).start()
+
+    def set_live(self, on: bool) -> None:
+        """Live text on or off (a session that is still loading reads prefs.live_text when it starts)."""
+        self.prefs.live_text = on
+        if self.session:
+            try:
+                self.session.set_partials(on)
+            except Exception as exc:  # a remote engine that went away
+                log.warning("Could not switch live text: %s", exc)
 
     def stats(self) -> dict | None:
         return self.session.stats() if self.session else None

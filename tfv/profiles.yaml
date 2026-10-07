@@ -15,10 +15,13 @@
 # min_ram_mb, min_cores. Profiles with `auto: false` are only used when chosen.
 #
 # Orderings follow EVAL.md (measured on an RTX 3050 4 GB laptop):
-# - Whisper turbo recognizes best, but SenseVoice on the CPU is close for
-#   Chinese and Japanese and leaves the GPU to a 4B translator, which
-#   translates much better than 2B (ja→zh chrF 24 vs 14). For English speech,
-#   especially with background sound, Whisper is clearly better.
+# - Japanese: ReazonSpeech k2 (CPU, trained on Japanese TV) makes far fewer
+#   errors on TV speech than everything else measured (CER 10% vs 12% Whisper
+#   turbo, 13% Kotoba-Whisper, 25% SenseVoice) and barely suffers in noise, so
+#   it comes first on every profile and leaves the GPU to the translator.
+# - Chinese: SenseVoice on the CPU is close to Whisper turbo and leaves the GPU
+#   to a 4B translator, which translates much better than 2B.
+# - English, especially with background sound: Whisper is clearly better.
 # - SenseVoice beat Whisper small in every language, so it is the fallback.
 # - TranslateGemma-4B translates best into Chinese, Qwen3.5-4B into English
 #   and Japanese. Models larger than 4B were not measured (too big here).
@@ -28,6 +31,7 @@ profiles:
     summary: NVIDIA GPU with 16 GB+ VRAM
     when: {gpu_vendor: [nvidia], cuda: true, min_vram_mb: 15000}
     asr: [whisper-large-v3@cuda, whisper-large-v3-turbo@cuda, sensevoice-small@cpu]
+    asr_ja: [reazonspeech-k2-v2@cpu, whisper-large-v3@cuda, sensevoice-small@cpu]
     mt: [qwen3.5-9b@gpu, translategemma-12b@gpu, qwen3.5-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
     mt_zh: [translategemma-12b@gpu, qwen3.5-9b@gpu, translategemma-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
 
@@ -35,6 +39,7 @@ profiles:
     summary: NVIDIA GPU with 8-12 GB VRAM
     when: {gpu_vendor: [nvidia], cuda: true, min_vram_mb: 7500}
     asr: [whisper-large-v3-turbo@cuda, sensevoice-small@cpu]
+    asr_ja: [reazonspeech-k2-v2@cpu, whisper-large-v3-turbo@cuda, sensevoice-small@cpu]
     mt: [qwen3.5-9b@gpu, qwen3.5-4b@gpu, translategemma-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
     mt_zh: [translategemma-12b@gpu, qwen3.5-9b@gpu, translategemma-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
 
@@ -43,7 +48,7 @@ profiles:
     when: {gpu_vendor: [nvidia], cuda: true, min_vram_mb: 3500}
     asr: [whisper-large-v3-turbo@cuda, sensevoice-small@cpu]
     asr_zh: [sensevoice-small@cpu, whisper-large-v3-turbo@cuda]
-    asr_ja: [sensevoice-small@cpu, whisper-large-v3-turbo@cuda]
+    asr_ja: [reazonspeech-k2-v2@cpu, sensevoice-small@cpu, whisper-large-v3-turbo@cuda]
     mt: [qwen3.5-4b@gpu, translategemma-4b@gpu, qwen3.5-2b@gpu, qwen3.5-2b@cpu, nllb-600m@cpu]
     mt_zh: [translategemma-4b@gpu, qwen3.5-4b@gpu, qwen3.5-2b@gpu, qwen3.5-2b@cpu, nllb-600m@cpu]
 
@@ -51,6 +56,7 @@ profiles:
     summary: AMD or Intel Arc GPU, or NVIDIA without CUDA libraries (speech on CPU, translation on the GPU)
     when: {gpu_vendor: [amd, intel, nvidia], min_vram_mb: 3500}
     asr: [sensevoice-small@cpu]
+    asr_ja: [reazonspeech-k2-v2@cpu, sensevoice-small@cpu]
     mt: [qwen3.5-4b@gpu, translategemma-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
     mt_zh: [translategemma-4b@gpu, qwen3.5-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
 
@@ -58,6 +64,7 @@ profiles:
     summary: Apple Silicon Mac (translation on the GPU through Metal)
     when: {os: [macos], arch: [arm64]}
     asr: [sensevoice-small@cpu, whisper-small@cpu]
+    asr_ja: [reazonspeech-k2-v2@cpu, sensevoice-small@cpu]
     mt: [qwen3.5-4b@gpu, translategemma-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
     mt_zh: [translategemma-4b@gpu, qwen3.5-4b@gpu, qwen3.5-2b@gpu, nllb-600m@cpu]
 
@@ -65,12 +72,14 @@ profiles:
     summary: no usable GPU, 6+ cores and 16 GB RAM
     when: {min_cores: 6, min_ram_mb: 15000}
     asr: [sensevoice-small@cpu]
+    asr_ja: [reazonspeech-k2-v2@cpu, sensevoice-small@cpu]
     mt: [qwen3.5-2b@cpu, nllb-600m@cpu]
 
   - name: cpu-low
     summary: any other computer
     when: {}
     asr: [sensevoice-small@cpu]
+    asr_ja: [reazonspeech-k2-v2@cpu, sensevoice-small@cpu]
     mt: [nllb-600m@cpu]
 
   - name: cloud

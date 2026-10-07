@@ -34,8 +34,12 @@ FLEURS = "https://huggingface.co/datasets/google/fleurs/resolve/main/data"
 _FLEURS_LANG = {"zh": "cmn_hans_cn", "en": "en_us", "ja": "ja_jp"}
 
 
-def eval_dir() -> Path:
-    path = models.models_dir().parent / "eval" / "fleurs"
+REAZONSPEECH = "japanese-asr/ja_asr.reazonspeech_test"
+"""ReazonSpeech's test set: Japanese TV (news, dramas, variety, sports), casual and unclear speech included."""
+
+
+def eval_dir(name: str = "fleurs") -> Path:
+    path = models.models_dir().parent / "eval" / name
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -111,10 +115,51 @@ def download(n: int = 20, status: Callable[[str], None] = print) -> Path:
     return manifest
 
 
-def load_manifest() -> list[dict]:
-    path = eval_dir() / "manifest.json"
+def download_reazonspeech(n: int = 200, status: Callable[[str], None] = print) -> Path:
+    """Fetch N clips spread evenly over the ReazonSpeech test set (Japanese only, no translations).
+
+    The clips are for measuring on this computer only; they are TV recordings, so don't redistribute them.
+    """
+    import httpx
+
+    target = eval_dir("reazonspeech")
+    rows_api = "https://datasets-server.huggingface.co/rows"
+    params = {"dataset": REAZONSPEECH, "config": "default", "split": "test"}
+    samples: list[dict] = []
+    with httpx.Client(timeout=60, follow_redirects=True) as http:
+
+        def get(url: str, **kw) -> httpx.Response:
+            for attempt in range(8):  # the dataset server rate-limits bursts
+                r = http.get(url, **kw)
+                if r.status_code not in (429, 500, 502, 503):
+                    r.raise_for_status()
+                    return r
+                time.sleep(float(r.headers.get("retry-after") or 2 ** attempt))
+            r.raise_for_status()
+            return r
+
+        total = get(rows_api, params={**params, "offset": 0, "length": 1}).json()["num_rows_total"]
+        pages = max(1, n // 10)  # runs of 10 consecutive clips from evenly spaced places
+        status(f"Downloading {n} of {total} ReazonSpeech clips…")
+        for page in range(pages):
+            length = (n - len(samples)) // (pages - page)
+            rows = get(rows_api, params={**params, "offset": page * total // pages, "length": length}).json()["rows"]
+            for item in rows:
+                row, name = item["row"], f"{item['row_idx']:05d}.flac"
+                if not (target / name).exists():
+                    (target / name).write_bytes(get(row["audio"][0]["src"]).content)
+                samples.append({"id": str(item["row_idx"]), "lang": "ja", "file": name, "refs": {"ja": row["transcription"]}})
+    manifest = target / "manifest.json"
+    manifest.write_text(json.dumps(samples, ensure_ascii=False, indent=1), "utf-8")
+    status(f"Saved {len(samples)} clips to {target}")
+    return manifest
+
+
+def load_manifest(name: str = "fleurs") -> list[dict]:
+    path = eval_dir(name) / "manifest.json"
     if not path.exists():
-        raise RuntimeError("no evaluation data yet; run `python -m tfv eval download` first")
+        option = "" if name == "fleurs" else f" --set {name}"
+        raise RuntimeError(f"no evaluation data yet; run `python -m tfv eval download{option}` first")
     return json.loads(path.read_text("utf-8"))
 
 
@@ -218,7 +263,9 @@ def _vram_used() -> int | None:
     return rows[0][1] - rows[0][2] if rows else None
 
 
-def run_asr(choice_text: str, samples: list[dict], snr_db: float | None, status: Callable[[str], None] = print) -> Result:
+def run_asr(
+    choice_text: str, samples: list[dict], snr_db: float | None, status: Callable[[str], None] = print, data: str = "fleurs"
+) -> Result:
     from faster_whisper.audio import decode_audio
 
     from tfv.engine.asr import create_asr
@@ -232,19 +279,22 @@ def run_asr(choice_text: str, samples: list[dict], snr_db: float | None, status:
     base = _vram_used()
     total_s = total_audio = 0.0
     asr = None
+    info = models.CATALOG.get(choice.model or "")
+    measured = []
     for lang in languages.SUPPORTED:
         clips = [s for s in samples if s["lang"] == lang]
-        if not clips:
+        if not clips or (info and info.languages and lang not in info.languages):
             continue
+        measured += clips
         if asr is None:
             asr = create_asr(choice, language=lang)
             if base is not None and (used := _vram_used()) is not None:
-                result.vram_mb = used - base
+                result.vram_mb = max(0, used - base)  # other programs' VRAM can shrink meanwhile
         else:
             asr.set_language(lang)
         hyps, refs = [], []
         for sample in clips:
-            audio = decode_audio(str(eval_dir() / sample["file"]), sampling_rate=16000)
+            audio = decode_audio(str(eval_dir(data) / sample["file"]), sampling_rate=16000)
             if snr_db is not None:
                 audio = add_noise(audio, snr_db, rng)
             out = asr.transcribe(audio)
@@ -256,8 +306,7 @@ def run_asr(choice_text: str, samples: list[dict], snr_db: float | None, status:
         status(f"  {choice_text} {lang}: {'CER' if lang != 'en' else 'WER'} {100 * result.scores[lang]:.1f}%")
     if asr is not None:
         asr.close()
-    n = len(samples)
-    result.seconds = total_s / max(n, 1)
+    result.seconds = total_s / max(len(measured), 1)
     result.rtf = total_s / max(total_audio, 1e-9)
     return result
 
@@ -276,7 +325,7 @@ def run_mt(choice_text: str, samples: list[dict], status: Callable[[str], None] 
     sentences = {sid: by_id[sid] for sid in sorted(by_id)[:limit]}
     translator = create_translator(choice, source="en", target="ja")
     if base is not None and (used := _vram_used()) is not None:
-        result.vram_mb = used - base
+        result.vram_mb = max(0, used - base)
     times = []
     try:
         for source in languages.SUPPORTED:
@@ -332,6 +381,25 @@ def report(hw: hardware.Hardware, n_clips: int, asr_clean: list[Result], asr_noi
         mean = sum(r.scores.values()) / max(len(r.scores), 1)
         cells = [f"{r.scores.get(d, 0):.1f}" for d in directions]
         lines.append(f"| {r.name} | " + " | ".join(cells) + f" | **{mean:.1f}** | {r.seconds:.2f} | {r.vram_mb if r.vram_mb is not None else '–'} |")
+    return "\n".join(lines) + "\n"
+
+
+def report_reazonspeech(hw: hardware.Hardware, n_clips: int, asr_clean: list[Result], asr_noisy: list[Result]) -> str:
+    lines = [
+        "# Japanese TV speech (ReazonSpeech)",
+        "",
+        f"Machine: {hw.summary()}  ",
+        f"Data: {n_clips} clips spread over the ReazonSpeech test set (news, dramas, variety, sports); "
+        "noisy = pink noise at 10 dB SNR. CER, lower is better.",
+        "",
+        "| Model | CER | CER noisy | s / utterance | × real time | VRAM MB |",
+        "|---|---|---|---|---|---|",
+    ]
+    noisy = {r.name: r for r in asr_noisy}
+    for r in asr_clean:
+        nz = noisy.get(r.name, Result(r.name))
+        vram = r.vram_mb if r.vram_mb is not None else "–"
+        lines.append(f"| {r.name} | {_pct(r.scores.get('ja'))} | {_pct(nz.scores.get('ja'))} | {r.seconds:.2f} | {r.rtf:.2f} | {vram} |")
     return "\n".join(lines) + "\n"
 
 

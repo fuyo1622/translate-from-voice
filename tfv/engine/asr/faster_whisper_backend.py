@@ -36,11 +36,12 @@ class FasterWhisperBackend(ASRBackend):
         if Path(model).is_dir():
             path = Path(model)
         else:
-            path = models.ensure(model if model.startswith("whisper-") else f"whisper-{model}").path
+            path = models.ensure(model if model in models.CATALOG else f"whisper-{model}").path
         t0 = time.perf_counter()
         self._model = WhisperModel(str(path), device=device, compute_type=compute_type, cpu_threads=cpu_threads)
         log.info("Loaded Whisper %s on %s (%s) in %.1fs", path.name, device, compute_type, time.perf_counter() - t0)
-        self.description = f"Whisper {path.name.removeprefix('whisper-')} on {device} ({compute_type})"
+        name = f"Whisper {path.name.removeprefix('whisper-')}" if path.name.startswith("whisper-") else path.name
+        self.description = f"{name} on {device} ({compute_type})"
         self._language = language
         self._options = dict(
             language=language,

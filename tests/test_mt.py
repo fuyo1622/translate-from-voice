@@ -37,3 +37,13 @@ def test_best_device_skips_integrated_intel():
     assert best_device(devices).id == "Vulkan1"
     assert best_device(devices[:1]) is None
     assert best_device([GpuDevice("Vulkan0", "Intel(R) Arc(TM) A770", 16000, 15000)]).id == "Vulkan0"
+
+
+def test_best_device_skips_software_vulkan():
+    # Linux with Mesa: lavapipe lists all of the RAM as free memory
+    devices = [
+        GpuDevice("Vulkan0", "AMD Radeon RX 7600 (RADV NAVI33)", 8176, 7900),
+        GpuDevice("Vulkan1", "llvmpipe (LLVM 17.0.6, 256 bits)", 31950, 31950),
+    ]
+    assert best_device(devices).id == "Vulkan0"
+    assert best_device(devices[1:]) is None

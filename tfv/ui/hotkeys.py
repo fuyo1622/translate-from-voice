@@ -25,7 +25,12 @@ HOTKEYS = {
     "L": "lock or unlock the overlay",
     "O": "show or hide the original text",
     "H": "hide or show the overlay",
+    "S": "open the settings",
+    "=": "bigger text",
+    "-": "smaller text",
 }
+
+_VIRTUAL_KEYS = {"=": 0xBB, "-": 0xBD}  # VK_OEM_PLUS (the =/+ key), VK_OEM_MINUS; letters are their own codes
 
 
 class _Filter(QAbstractNativeEventFilter):
@@ -52,7 +57,7 @@ class GlobalHotkeys:
         self.registered: list[str] = []
 
     def register(self, bindings: dict[str, Callable[[], None]]) -> None:
-        """bindings: key letter -> callback, each bound to Ctrl+Alt+<key>."""
+        """bindings: key (a letter, "=" or "-") -> callback, each bound to Ctrl+Alt+<key>."""
         if sys.platform != "win32":
             return
         user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -60,7 +65,7 @@ class GlobalHotkeys:
         self._window.setWindowTitle("tfv hotkeys")
         hwnd = int(self._window.winId())  # creates the native window without showing it
         for i, (key, callback) in enumerate(bindings.items(), start=1):
-            if user32.RegisterHotKey(hwnd, i, _MOD_CONTROL | _MOD_ALT | _MOD_NOREPEAT, ord(key.upper())):
+            if user32.RegisterHotKey(hwnd, i, _MOD_CONTROL | _MOD_ALT | _MOD_NOREPEAT, _VIRTUAL_KEYS.get(key, ord(key.upper()))):
                 self._handlers[i] = callback
                 self.registered.append(f"Ctrl+Alt+{key.upper()}")
             elif (error := ctypes.get_last_error()) == 1409:  # ERROR_HOTKEY_ALREADY_REGISTERED

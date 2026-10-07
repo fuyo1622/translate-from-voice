@@ -28,10 +28,17 @@ class Prefs:
     mt: str = "auto"
     mt_url: str = ""
     adapt: bool = True
+    vad_denoise: bool = True
+    """Find speech under background music and noise (the speech detector hears a denoised copy)."""
     # overlay
     show_original: bool = True
     show_together: bool = True
-    """Hold the original until its translation is ready, so both lines appear at the same time."""
+    """Hold the original until its translation is ready, so both lines appear at the same time
+    (only when live text is off)."""
+    live_text: bool = True
+    """Show the words while they are still being spoken; the translation follows each phrase."""
+    furigana: bool = True
+    """Small readings above kanji in Japanese lines."""
     font_size: int = 22
     opacity: float = 0.55
     """Background panel opacity (the text stays opaque)."""
@@ -40,8 +47,12 @@ class Prefs:
     clear_after_s: int = 8
     locked: bool = False
     """Locked: clicks pass through the overlay to the window below."""
+    unlock_button: bool = True
+    """While locked, a small button at the bar's corner unlocks it."""
     geometry: list[int] = field(default_factory=list)
     """[x, y, width] of the overlay; empty = bottom center of the primary screen."""
+    tip_shown: bool = False
+    """The first-start notice about where the menu is has been shown."""
 
     @classmethod
     def load(cls) -> Prefs:
@@ -65,7 +76,7 @@ class Prefs:
 
     def engine_key(self) -> tuple:
         """Settings whose change requires reloading the models."""
-        return (self.capture, self.audio_device, self.remote_url, self.profile, self.asr, self.mt, self.mt_url, self.adapt)
+        return (self.capture, self.audio_device, self.remote_url, self.profile, self.asr, self.mt, self.mt_url, self.adapt, self.vad_denoise)
 
 
 def prefs_path() -> Path:

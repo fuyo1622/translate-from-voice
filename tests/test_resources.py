@@ -48,12 +48,15 @@ def test_profile_selection(hw, expected):
 def test_per_language_ladders():
     small = choose_profile(machine(GPU("RTX 3050 Laptop", "nvidia", 4096), cuda=True))
     assert small.asr_for("en")[0] == Choice.parse("whisper-large-v3-turbo@cuda")
-    assert small.asr_for("ja")[0] == Choice.parse("sensevoice-small@cpu")  # frees the GPU for a 4B translator
+    assert small.asr_for("zh")[0] == Choice.parse("sensevoice-small@cpu")  # frees the GPU for a 4B translator
     assert small.mt_for("zh")[0] == Choice.parse("translategemma-4b@gpu")
     assert small.mt_for("en")[0] == Choice.parse("qwen3.5-4b@gpu")
     assert small.mt_for(None) == small.mt
     cpu = choose_profile(machine(ram_mb=8000))
-    assert cpu.asr_for("ja") == cpu.asr and cpu.mt_for("zh") == cpu.mt  # no overrides: the defaults
+    assert cpu.asr_for("zh") == cpu.asr and cpu.mt_for("zh") == cpu.mt  # no overrides: the defaults
+    for profile in load_profiles():  # Japanese TV speech: ReazonSpeech, on the CPU, wherever it can run
+        if profile.name != "cloud":
+            assert profile.asr_for("ja")[0] == Choice.parse("reazonspeech-k2-v2@cpu")
 
 
 def test_cloud_profile_is_never_automatic():
@@ -156,3 +159,13 @@ def test_monitor_reacts_to_dropped_utterances():
     p.s["dropped_utterances"] = 2
     m.check()
     assert calls == ["asr"]
+
+
+def test_japanese_only_recognizers_refuse_other_languages():
+    from tfv.engine.asr import create_asr
+
+    assert Choice.parse("reazonspeech-k2-v2") == Choice("reazonspeech", "reazonspeech-k2-v2", "cpu")
+    assert Choice.parse("kotoba-whisper-v2.0") == Choice("faster-whisper", "kotoba-whisper-v2.0", "cuda")
+    for model in ("reazonspeech-k2-v2", "kotoba-whisper-v2.0"):
+        with pytest.raises(ValueError, match="recognizes only Japanese"):
+            create_asr(Choice.parse(model), language="zh")  # refused before anything loads

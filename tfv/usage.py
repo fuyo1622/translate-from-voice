@@ -15,6 +15,7 @@ PRICES: dict[tuple[str, str], dict[str, float]] = {
     ("claude", "claude-opus-5"): {"input_mtok": 5.0, "output_mtok": 25.0},
     ("claude", "claude-opus-5-5"): {"input_mtok": 4.0, "output_mtok": 20.0},
     ("claude", "claude-sonnet-5"): {"input_mtok": 2.0, "output_mtok": 10.0},
+    ("claude", "claude-sonnet-5-5"): {"input_mtok": 2.0, "output_mtok": 10.0},
     ("claude", "claude-haiku-4-5"): {"input_mtok": 1.0, "output_mtok": 5.0},
     ("claude", "claude-fable-5-1"): {"input_mtok": 10.0, "output_mtok": 50.0},
     ("openai", "gpt-6-luna"): {"input_mtok": 0.1, "output_mtok": 0.5},
@@ -65,7 +66,7 @@ def total_cost() -> float:
 
 
 def summary() -> list[str]:
-    """One line per paid service used, e.g. "claude claude-opus-5: 12 requests, 3,120 tokens, ~$0.03"."""
+    """One line per paid service used, e.g. "claude claude-opus-5-5: 12 requests, 3,120 tokens, ~$0.02"."""
     lines = []
     with _lock:
         for (service, model), m in _meters.items():

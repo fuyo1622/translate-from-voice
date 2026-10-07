@@ -22,6 +22,8 @@ class SpeechSegment:
     forced: bool = False
     """True if cut because it reached the maximum length, not at a pause."""
     created_at: float = field(default_factory=time.monotonic)
+    utterance: int = 0
+    """Counts up per utterance; live snapshots of an utterance share its number."""
 
     @property
     def duration(self) -> float:
@@ -38,7 +40,7 @@ class SegmenterConfig:
     """A pause this long ends an utterance."""
     pad_ms: int = 200
     """Audio kept before and after the speech."""
-    max_segment_s: float = 12.0
+    max_segment_s: float = 8.0
     """Longer speech is split at its quietest point so captions keep flowing."""
 
 
@@ -70,8 +72,12 @@ class Segmenter:
         self._max_len = max(windows(cfg.max_segment_s * 1000), self._min_silence + 2)
 
         self._pending = np.zeros(0, dtype=np.float32)
+        self._pending_vad = np.zeros(0, dtype=np.float32)
         self._pre_roll: deque[np.ndarray] = deque(maxlen=self._pad)
         self._pos = 0  # windows consumed since the stream started
+        self._utterance = 0
+        self.discarded: list[int] = []
+        """Utterances dropped as too short to be speech (the caller clears the list)."""
         self._reset_segment()
 
     @property
@@ -79,16 +85,31 @@ class Segmenter:
         """True while inside an utterance."""
         return self._in_speech
 
-    def push(self, audio: np.ndarray) -> list[SpeechSegment]:
-        """Feed audio of any length; returns the utterances it completed."""
+    def snapshot(self) -> SpeechSegment | None:
+        """The utterance in progress so far, for live text; None between utterances."""
+        if not self._in_speech:
+            return None
+        return self._segment(self._windows, self._start, forced=False)
+
+    def push(self, audio: np.ndarray, vad_audio: np.ndarray | None = None) -> list[SpeechSegment]:
+        """Feed audio of any length; returns the utterances it completed.
+
+        `vad_audio`, the same length, is what the VAD judges instead (e.g. denoised);
+        the utterances are still cut from `audio`.
+        """
         buf = np.concatenate([self._pending, audio]) if len(self._pending) else np.asarray(audio, np.float32)
+        if vad_audio is None:
+            vad_buf = buf
+        else:
+            vad_buf = np.concatenate([self._pending_vad, vad_audio]) if len(self._pending_vad) else np.asarray(vad_audio, np.float32)
         n = len(buf) // self._win
         done = []
         for i in range(n):
             window = buf[i * self._win : (i + 1) * self._win]
-            if (seg := self._step(window, self._vad(window))) is not None:
+            if (seg := self._step(window, self._vad(vad_buf[i * self._win : (i + 1) * self._win]))) is not None:
                 done.append(seg)
         self._pending = buf[n * self._win :].copy()
+        self._pending_vad = vad_buf[n * self._win :].copy()
         return done
 
     def flush(self) -> SpeechSegment | None:
@@ -99,6 +120,7 @@ class Segmenter:
         # whatever follows an idle gap is not continuous with what came before
         self._pre_roll.clear()
         self._pending = np.zeros(0, dtype=np.float32)
+        self._pending_vad = np.zeros(0, dtype=np.float32)
         if hasattr(self._vad, "reset"):
             self._vad.reset()
         return seg
@@ -118,6 +140,7 @@ class Segmenter:
                 self._pre_roll.append(window)
                 return None
             self._in_speech = True
+            self._utterance += 1
             self._windows = [*self._pre_roll, window]
             self._probs = [0.0] * len(self._pre_roll) + [prob]
             self._start = index - len(self._pre_roll)
@@ -142,7 +165,12 @@ class Segmenter:
         dropped = self._windows[keep:]
         self._reset_segment()
         self._pre_roll.extend(dropped)  # silence after this utterance pads the next one
+        # Silero's memory of the last speaker can keep a new voice after a short pause
+        # below the threshold for seconds (measured on TV speech): start each utterance fresh.
+        if hasattr(self._vad, "reset"):
+            self._vad.reset()
         if sum(p >= self.config.threshold for p in probs) < self._min_speech:
+            self.discarded.append(self._utterance)  # live text already shown for it must go
             return None
         return self._segment(windows, start, forced=False)
 
@@ -155,6 +183,7 @@ class Segmenter:
         tail = np.asarray(self._probs[lo:])
         cut = n - 1 - int(np.argmin(tail[::-1]))
         seg = self._segment(self._windows[:cut], self._start, forced=True)
+        self._utterance += 1  # the rest continues as the next caption
         self._windows, self._probs = self._windows[cut:], self._probs[cut:]
         self._start += cut
         self._silence_run = 0
@@ -167,4 +196,5 @@ class Segmenter:
     def _segment(self, windows: list[np.ndarray], start_window: int, forced: bool) -> SpeechSegment:
         audio = np.concatenate(windows)
         start = start_window * self._win / SAMPLE_RATE
-        return SpeechSegment(audio=audio, start=start, end=start + len(audio) / SAMPLE_RATE, forced=forced)
+        end = start + len(audio) / SAMPLE_RATE
+        return SpeechSegment(audio=audio, start=start, end=end, forced=forced, utterance=self._utterance)

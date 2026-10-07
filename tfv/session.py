@@ -40,6 +40,10 @@ class SessionConfig:
     threads: int | None = None
     adapt: bool = True
     """Step down to lighter models while running if live audio cannot be kept up with."""
+    partials: bool = False
+    """Live text: also emit "partial" captions while someone is still talking."""
+    vad_denoise: bool = True
+    """Let the VAD hear a denoised copy, so speech under music or noise isn't missed."""
     segmenter: SegmenterConfig = field(default_factory=SegmenterConfig)
 
 
@@ -70,6 +74,7 @@ class Session:
 
     def start(self) -> None:
         """Load everything (downloading models on first use) and start listening. Blocks while loading."""
+        from tfv.engine.furigana import Furigana
         from tfv.engine.segmenter import Segmenter
         from tfv.engine.textproc import TextPostProcessor
         from tfv.engine.vad import SileroVAD
@@ -77,6 +82,9 @@ class Session:
         cfg = self.config
         source = self._source or self._make_source()
         models.set_progress_listener(self._download_progress)
+        furigana = Furigana()
+        if cfg.source_lang == "ja":  # load the dictionary while the models load
+            threading.Thread(target=_quietly, args=(furigana.load,), name="tfv-furigana", daemon=True).start()
         self.hardware = hw = hardware.probe()
         self.profile = resources.choose_profile(hw, cfg.profile)
         self._status(f"{hw.summary()} → profile {self.profile.name}")
@@ -91,10 +99,18 @@ class Session:
             self._status(f"Translation: {self.translator.description}")
 
         vad = SileroVAD(models.ensure("silero-vad").main_file)
+        denoiser = None
+        if cfg.vad_denoise:
+            from tfv.engine.denoise import VadDenoiser
+
+            try:
+                denoiser = VadDenoiser(models.ensure("gtcrn").main_file)
+            except Exception as exc:  # e.g. offline on the first start
+                log.warning("Background filter unavailable (%s); speech under music may be missed", exc)
         self.pipeline = Pipeline(
             source, Segmenter(vad, cfg.segmenter), self.asr, self._on_caption,
             source_lang=cfg.source_lang, target_lang=cfg.target_lang, translator=self.translator,
-            postprocess=TextPostProcessor(),
+            postprocess=TextPostProcessor(), readings=furigana.segments, vad_denoiser=denoiser, partials=cfg.partials,
         )  # fmt: skip
         self.pipeline.start()
         if source.realtime and cfg.adapt:
@@ -122,6 +138,12 @@ class Session:
     def resume(self) -> None:
         if self.pipeline:
             self.pipeline.resume()
+
+    def set_partials(self, on: bool) -> None:
+        """Turn live text on or off while running."""
+        self.config.partials = on
+        if self.pipeline:
+            self.pipeline.partials = on
 
     def describe(self) -> list[str]:
         """What is running, for status displays."""
@@ -262,3 +284,10 @@ def make_source(cfg: SessionConfig, on_status: StatusCallback | None = None):
 def _close(backend) -> None:
     if backend is not None and hasattr(backend, "close"):
         backend.close()
+
+
+def _quietly(load) -> None:
+    try:
+        load()
+    except Exception as exc:  # captions then just have no readings
+        log.warning("Furigana unavailable: %s", exc)

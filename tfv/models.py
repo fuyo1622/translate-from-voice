@@ -36,7 +36,7 @@ class ModelInfo:
     task: str
     """"vad", "asr" or "mt"."""
     engine: str
-    """Which backend loads it: silero, faster-whisper, sensevoice, nllb, llama."""
+    """Which backend loads it: silero, faster-whisper, sensevoice, reazonspeech, nllb, llama."""
     size_mb: int
     license: str
     repo: str = ""
@@ -48,6 +48,8 @@ class ModelInfo:
     prompt: str = ""
     """For llama models: the prompt format ("chat", "translategemma", "hunyuan")."""
     summary: str = ""
+    languages: tuple[str, ...] = ()
+    """Spoken languages a recognizer handles; empty = all supported ones."""
 
     @property
     def path(self) -> Path:
@@ -79,6 +81,13 @@ CATALOG: dict[str, ModelInfo] = {
             sha256="1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
             summary="Silero VAD v6.2: finds speech in the audio",
         ),
+        ModelInfo(
+            "gtcrn", "vad", "gtcrn", 1, "MIT",
+            url="https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx",
+            files=("gtcrn_simple.onnx",),
+            sha256="e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534",
+            summary="GTCRN speech denoiser: lets the VAD find speech under music and noise",
+        ),
         _whisper("large-v3-turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1620, "Whisper turbo: best speed/quality on NVIDIA GPUs"),
         _whisper("large-v3", "Systran/faster-whisper-large-v3", 3090, "Whisper large-v3: best quality, needs a strong GPU"),
         _whisper("medium", "Systran/faster-whisper-medium", 1530, "Whisper medium"),
@@ -88,6 +97,18 @@ CATALOG: dict[str, ModelInfo] = {
             repo="csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
             files=("model.int8.onnx", "tokens.txt"),
             summary="SenseVoice-Small int8: fast on CPU, strong on Chinese",
+        ),
+        ModelInfo(
+            "kotoba-whisper-v2.0", "asr", "faster-whisper", 1445, "MIT",
+            repo="kotoba-tech/kotoba-whisper-v2.0-faster", files=_WHISPER_FILES, languages=("ja",),
+            summary="Kotoba-Whisper v2.0: Whisper distilled for Japanese",
+        ),
+        ModelInfo(
+            "reazonspeech-k2-v2", "asr", "reazonspeech", 161, "Apache-2.0",
+            repo="reazon-research/reazonspeech-k2-v2",
+            files=("encoder-epoch-99-avg-1.int8.onnx", "decoder-epoch-99-avg-1.onnx", "joiner-epoch-99-avg-1.int8.onnx", "tokens.txt"),
+            languages=("ja",),
+            summary="ReazonSpeech k2 v2: Japanese only, trained on 35,000 h of TV speech, fast on CPU",
         ),
         ModelInfo(
             "nllb-600m", "mt", "nllb", 640, "CC-BY-NC-4.0 (non-commercial)",

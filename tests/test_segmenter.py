@@ -87,3 +87,34 @@ def test_chunk_size_does_not_matter(chunk):
     samples = audio(("silence", 0.5), ("speech", 1.5), ("silence", 1), ("speech", 0.8), ("silence", 1))
     reference = [(s.start, len(s.audio)) for s in run(samples, chunk=1600)]
     assert [(s.start, len(s.audio)) for s in run(samples, chunk=chunk)] == reference
+
+
+def test_utterances_are_numbered_and_live_snapshots_share_the_number():
+    seg = Segmenter(fake_vad, SegmenterConfig(max_segment_s=8))
+    assert seg.snapshot() is None
+    seg.push(audio(("silence", 0.5), ("speech", 1.0)))
+    live = seg.snapshot()
+    assert live is not None and live.utterance == 1 and live.duration == pytest.approx(1.2, abs=0.05)
+    done = seg.push(audio(("speech", 0.5), ("silence", 1.0)))
+    assert [s.utterance for s in done] == [1] and done[0].start == live.start
+    assert seg.snapshot() is None
+    later = seg.push(audio(("speech", 20.0)))  # cut at the maximum length: the rest is a new caption
+    assert [s.utterance for s in later] == [2, 3] and later[0].forced
+    assert seg.snapshot().utterance == 4
+
+
+def test_each_utterance_starts_with_a_fresh_vad_and_blips_are_reported():
+    class Vad:
+        resets = 0
+
+        def __call__(self, window):
+            return fake_vad(window)
+
+        def reset(self):
+            Vad.resets += 1
+
+    seg = Segmenter(Vad())
+    done = seg.push(audio(("speech", 1.0), ("silence", 1.0), ("speech", 0.1), ("silence", 1.0)))
+    assert [s.utterance for s in done] == [1]
+    assert seg.discarded == [2]  # the 0.1 s blip was too short to be speech
+    assert Vad.resets == 2  # the VAD forgot the first voice before the next one

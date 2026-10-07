@@ -15,6 +15,7 @@ datas, binaries, hiddenimports = [], [], []
 for package in (
     "tfv", "faster_whisper", "ctranslate2", "sherpa_onnx", "opencc", "onnxruntime", "tokenizers",
     "soxr", "pyaudiowpatch", "sounddevice", "_sounddevice_data", "keyring", "anthropic", "websockets",
+    "sudachipy", "sudachidict_core",
 ):  # fmt: skip
     d, b, h = collect_all(package)
     datas += d
@@ -24,11 +25,16 @@ for package in (
 if NVIDIA:
     import nvidia
 
+    found = set()
     for root in nvidia.__path__:
         for lib in ("cudnn", "cublas"):
             bin_dir = os.path.join(root, lib, "bin")
             if os.path.isdir(bin_dir):
                 binaries += [(os.path.join(bin_dir, f), f"nvidia/{lib}/bin") for f in os.listdir(bin_dir) if f.endswith(".dll")]
+                found.add(lib)
+    if found != {"cudnn", "cublas"}:
+        # A CUDA toolkit on this PATH would hide the gap here, and the build would fail elsewhere.
+        raise SystemExit("TFV_NVIDIA=1 needs the cuDNN and cuBLAS wheels: pip install -e .[nvidia]")
 
 excludes = ["tkinter", "matplotlib", "torch", "IPython", "pytest"] + ([] if NVIDIA else ["nvidia"])
 

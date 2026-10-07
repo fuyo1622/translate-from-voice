@@ -1,8 +1,9 @@
 """The subtitle overlay: a frameless, always-on-top window near the bottom of the screen.
 
 Locked, it lets clicks pass through to the video or window below; unlocked, it
-can be dragged and resized. Captions grow upward from a fixed bottom edge and
-fade out after a few seconds without speech.
+can be dragged, resized by its side edges, and right-clicked for the menu.
+Captions grow upward from a fixed bottom edge, update while someone is still
+talking (live text), and fade out after a few seconds without speech.
 """
 
 from __future__ import annotations
@@ -11,10 +12,12 @@ import time
 
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
-from PySide6.QtWidgets import QLabel, QSizeGrip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from tfv.engine.pipeline import Caption
+from tfv.ui.controls import ToolBar, UnlockButton
 from tfv.ui.prefs import Prefs
+from tfv.ui.ruby import RubyLabel
 
 # Han characters look different in Chinese and Japanese fonts, so pick per language.
 _FONTS = {
@@ -32,21 +35,44 @@ def font_for(lang: str | None, size: int, bold: bool = False) -> QFont:
     return font
 
 
+UNLOCKED_HINT = "Drag to move · drag a side edge to resize · buttons above, or right-click for the menu · 🔒 locks it"
+
+_ORIGINAL_RGBA = (240, 240, 240, 235)
+_LIVE_RGBA = (205, 205, 205, 190)
+"""Text still being spoken: dimmer, since it may change."""
+
+
 class _Row:
     def __init__(self, parent: QWidget):
         self.original = QLabel(parent)
+        self.ruby = RubyLabel(parent)  # the original with furigana, shown instead when there are readings
+        self.ruby.hide()
         self.translation = QLabel(parent)
         for label in (self.original, self.translation):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setWordWrap(True)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.original.setStyleSheet("color: rgba(235, 235, 235, 210);")
         self.translation.setStyleSheet("color: white;")
         self.updated = time.monotonic()
+        self.caption: Caption | None = None
+        """The latest state shown, so a style change can redraw it."""
 
-    def widgets(self) -> list[QLabel]:
-        return [self.original, self.translation]
+    def show_original(self, text: str, ruby: list | None, font: QFont, live: bool, visible: bool) -> None:
+        rgba = _LIVE_RGBA if live else _ORIGINAL_RGBA
+        if ruby:
+            self.ruby.setSegments(ruby)
+            self.ruby.setFont(font)
+            self.ruby.setColor(QColor(*rgba))
+        else:
+            self.original.setText(text)
+            self.original.setFont(font)
+            self.original.setStyleSheet("color: rgba({}, {}, {}, {});".format(*rgba))
+        self.ruby.setVisible(visible and bool(ruby))
+        self.original.setVisible(visible and not ruby)
+
+    def widgets(self) -> list[QWidget]:
+        return [self.original, self.ruby, self.translation]
 
     def delete(self) -> None:
         for w in self.widgets():
@@ -55,6 +81,14 @@ class _Row:
 
 class OverlayWindow(QWidget):
     geometry_changed = Signal()
+    menu_requested = Signal(QPoint)
+    """Right-click while unlocked: the app shows its menu there (the tray icon can be hard to find)."""
+    action_requested = Signal(str, QPoint)
+    """A toolbar button or the unlock button was clicked: its name, and where a menu should open."""
+
+    EDGE = 12
+    """Pixels at the left and right edge that resize instead of moving."""
+    MIN_WIDTH = 240
 
     def __init__(self, prefs: Prefs):
         super().__init__(None)
@@ -62,9 +96,15 @@ class OverlayWindow(QWidget):
         self.setWindowTitle("tfv subtitles")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)  # resize cursors at the edges
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(18, 10, 18, 12)
         self._layout.setSpacing(4)
+        self.toolbar = ToolBar(self)  # shown while unlocked
+        self.toolbar.triggered.connect(self.action_requested)
+        self._layout.addWidget(self.toolbar)
+        self._unlock = UnlockButton()  # shown at the corner while locked
+        self._unlock.clicked.connect(lambda: self.action_requested.emit("unlock", QPoint()))
         self._status = QLabel(self)
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setWordWrap(True)
@@ -73,22 +113,28 @@ class OverlayWindow(QWidget):
         self._layout.addWidget(self._status)
         self._rows: dict[int, _Row] = {}
         self._status_until = 0.0
-        self._grip = QSizeGrip(self)
-        self._drag_offset: QPoint | None = None
+        self._press: tuple[str, QPoint, QPoint, int] | None = None
+        """While the left button is down: (what it does, where it was pressed, top-left then, width then)."""
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._expire)
         self._timer.start(500)
-        self._apply_flags()
         self._restore_geometry()
+        self._apply_flags()
         self.apply_style()
 
     # -- public ------------------------------------------------------------------
 
     def show_caption(self, caption: Caption) -> None:
-        if self.prefs.show_together and caption.target_lang is not None and caption.stage == "text":
-            return  # shown together with its translation (or alone if translation fails)
+        if caption.stage == "dropped":  # the live text was noise after all
+            if (gone := self._rows.pop(caption.id, None)) is not None:
+                gone.delete()
+                self._relayout()
+            return
+        translating = caption.target_lang is not None
         row = self._rows.get(caption.id)
         if row is None:
+            if self.prefs.show_together and translating and caption.stage == "text":
+                return  # shown together with its translation (or alone if translation fails)
             row = _Row(self)
             self._rows[caption.id] = row
             for w in row.widgets():
@@ -96,18 +142,33 @@ class OverlayWindow(QWidget):
             while len(self._rows) > max(1, self.prefs.lines):
                 oldest = next(iter(self._rows))
                 self._rows.pop(oldest).delete()
+        self._render(row, caption)
+        row.updated = time.monotonic()
+        self._relayout()
+
+    def _render(self, row: _Row, caption: Caption) -> None:
+        row.caption = caption
         translating = caption.target_lang is not None
-        row.original.setText(caption.text)
-        row.original.setFont(font_for(caption.source_lang, self.prefs.font_size * (7 if translating else 10) // 10))
-        row.original.setVisible(self.prefs.show_original or not translating or caption.stage == "untranslated")
-        if translating and caption.stage != "untranslated":
+        live = caption.stage == "partial"
+        ruby = caption.ruby if self.prefs.furigana else None
+        size = self.prefs.font_size
+        if translating:  # smaller beside its translation, but not so small that its readings can't be read
+            size = round(size * (0.85 if ruby else 0.7))
+        row.show_original(
+            caption.text,
+            ruby,
+            font_for(caption.source_lang, size),
+            live,
+            visible=self.prefs.show_original or not translating or live or caption.stage == "untranslated",
+        )
+        if live:
+            row.translation.setVisible(False)  # translated once the phrase is complete
+        elif translating and caption.stage != "untranslated":
             row.translation.setText(caption.translation or "…")
             row.translation.setFont(font_for(caption.target_lang, self.prefs.font_size, bold=True))
             row.translation.setVisible(True)
         else:
             row.translation.setVisible(False)
-        row.updated = time.monotonic()
-        self._relayout()
 
     def show_status(self, text: str, seconds: float = 6.0) -> None:
         """A small notice above the captions (loading, errors); empty text hides it."""
@@ -125,12 +186,14 @@ class OverlayWindow(QWidget):
     def set_locked(self, locked: bool) -> None:
         self.prefs.locked = locked
         self._apply_flags()
-        self.show_status("" if locked else "Drag to move, drag the corner to resize. Lock again from the tray menu or Ctrl+Alt+L.", 8)
+        self.show_status("" if locked else UNLOCKED_HINT, 10)
 
     def apply_style(self) -> None:
-        """Re-read font size, line count and visibility options from prefs."""
+        """Re-read font size, line count and visibility options from prefs (also for captions on screen)."""
         while len(self._rows) > max(1, self.prefs.lines):
             self._rows.pop(next(iter(self._rows))).delete()
+        for row in self._rows.values():
+            self._render(row, row.caption)
         self._relayout()
         self.update()
 
@@ -147,10 +210,31 @@ class OverlayWindow(QWidget):
             flags |= Qt.WindowType.WindowTransparentForInput
         was_visible = self.isVisible()
         self.setWindowFlags(flags)
-        self._grip.setVisible(not self.prefs.locked)
+        self.unsetCursor()
+        self.toolbar.setVisible(not self.prefs.locked)
         if was_visible:
             self.show()
-        self.update()
+        self._relayout()
+
+    def min_width(self) -> int:
+        """Narrowest the bar may be dragged to: the toolbar must fit."""
+        margins = self._layout.contentsMargins()
+        return max(self.MIN_WIDTH, self.toolbar.sizeHint().width() + margins.left() + margins.right())
+
+    def _sync_unlock_button(self) -> None:
+        show = self.prefs.locked and self.prefs.unlock_button and self.isVisible()
+        if show:
+            g = self.geometry()
+            self._unlock.move(g.right() - self._unlock.width() - 4, g.top() + 4)
+        self._unlock.setVisible(show)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._sync_unlock_button()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._unlock.hide()
 
     def _restore_geometry(self) -> None:
         screen = QGuiApplication.primaryScreen().availableGeometry()
@@ -166,9 +250,11 @@ class OverlayWindow(QWidget):
     def _relayout(self) -> None:
         self._status.setVisible(bool(self._status.text()) and time.monotonic() < self._status_until)
         self._layout.activate()
-        height = max(40, self._layout.totalHeightForWidth(self._width))
-        self.setGeometry(QRect(self._x, self._bottom - height, self._width, height))
-        self._grip.move(self.width() - self._grip.width(), self.height() - self._grip.height())
+        width = self._width if self.prefs.locked else max(self._width, self.min_width())
+        # -1 when nothing visible wraps (e.g. only the toolbar): then the minimum size decides
+        height = max(40, self._layout.totalHeightForWidth(width), self._layout.totalMinimumSize().height())
+        self.setGeometry(QRect(self._x, self._bottom - height, width, height))
+        self._sync_unlock_button()
         self.update()
 
     def _has_content(self) -> bool:
@@ -186,6 +272,13 @@ class OverlayWindow(QWidget):
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 12, 12)
+            # handles on the side edges, which resize
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 200))
+            handle = min(28, self.height() - 16)
+            top = (self.height() - handle) // 2
+            for x in (4, self.width() - 8):
+                painter.drawRoundedRect(x, top, 4, handle, 2, 2)
 
     def _expire(self) -> None:
         now = time.monotonic()
@@ -195,30 +288,44 @@ class OverlayWindow(QWidget):
         if stale or (self._status.isVisible() and now >= self._status_until):
             self._relayout()
 
-    # -- moving and resizing when unlocked --------------------------------------------
+    # -- moving, resizing and the menu when unlocked ------------------------------------
+
+    def _zone(self, x: float) -> str:
+        if x < self.EDGE:
+            return "left"
+        if x >= self.width() - self.EDGE:
+            return "right"
+        return "move"
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and not self.prefs.locked:
-            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            zone = self._zone(event.position().x())
+            self._press = (zone, event.globalPosition().toPoint(), self.geometry().topLeft(), self._width)
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag_offset is not None:
-            top_left = event.globalPosition().toPoint() - self._drag_offset
-            self._x, self._bottom = top_left.x(), top_left.y() + self.height()
-            self.move(top_left)
+        if self._press is None:
+            if not self.prefs.locked:
+                move = self._zone(event.position().x()) == "move"
+                self.setCursor(Qt.CursorShape.SizeAllCursor if move else Qt.CursorShape.SizeHorCursor)
+            return
+        zone, start, top_left, width = self._press
+        delta = event.globalPosition().toPoint() - start
+        if zone == "move":
+            self._x, self._bottom = top_left.x() + delta.x(), top_left.y() + delta.y() + self.height()
+        elif zone == "right":
+            self._width = max(self.min_width(), width + delta.x())
+        else:  # the left edge moves; the right edge stays put
+            self._width = max(self.min_width(), width - delta.x())
+            self._x = top_left.x() + width - self._width
+        self._relayout()
 
     def mouseReleaseEvent(self, event) -> None:
-        if self._drag_offset is not None:
-            self._drag_offset = None
+        if self._press is not None:
+            self._press = None
             self._save_geometry()
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if not self.prefs.locked and self.width() != self._width and self._drag_offset is None:
-            # the size grip changed the width; keep the bottom edge where it was
-            self._width = max(240, self.width())
-            self._save_geometry()
-            QTimer.singleShot(0, self._relayout)
+    def contextMenuEvent(self, event) -> None:
+        self.menu_requested.emit(event.globalPos())
 
     def _save_geometry(self) -> None:
         self.prefs.geometry = [self._x, self._bottom, self._width]

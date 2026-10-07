@@ -41,7 +41,7 @@ class Choice:
         name, _, device = text.strip().partition("@")
         if name in models.CATALOG:
             info = models.CATALOG[name]
-            default = "cpu" if info.engine in ("sensevoice", "nllb") else "gpu" if info.engine == "llama" else "cuda"
+            default = "cpu" if info.engine in ("sensevoice", "reazonspeech", "nllb") else "gpu" if info.engine == "llama" else "cuda"
             return cls(info.engine, name, device or default)
         if Path(name).is_dir():  # a local CTranslate2 Whisper model
             return cls("faster-whisper", name, device or "cuda")

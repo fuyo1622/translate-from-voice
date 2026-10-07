@@ -34,6 +34,9 @@ _MUSIC_ONLY = re.compile(r"^[\s♪♫♬#*\-~(\[（【]*(music|音楽|音乐|音
 # CJK punctuation, kana, ideographs and full-width forms
 _CJK = "　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯"
 _SPACE_IN_CJK = re.compile(f"(?<=[{_CJK}])\\s+(?=[{_CJK}])")
+# Japanese never spaces numbers from their counters ("午前 9 時", "50 円"); Chinese keeps
+# the spaces some writers put around Latin text and digits.
+_SPACE_AROUND_DIGITS_JA = re.compile(f"(?<=[{_CJK}])\\s+(?=[0-9])|(?<=[0-9])\\s+(?=[{_CJK}])")
 # a lone "." (not part of "...") counts too
 _ASCII_PUNCT_IN_CJK = re.compile(f"(?<=[{_CJK}])([,?!:;]|\\.(?!\\.))\\s*(?=[{_CJK}]|$)")
 _FULLWIDTH = {
@@ -79,4 +82,6 @@ class TextPostProcessor:
             table = _FULLWIDTH[language]
             text = _ASCII_PUNCT_IN_CJK.sub(lambda m: table[m.group(1)], text)
             text = _SPACE_IN_CJK.sub("", text)
+            if language == "ja":
+                text = _SPACE_AROUND_DIGITS_JA.sub("", text)
         return text

@@ -230,7 +230,7 @@ needs no code change. The user can always override profile or individual compone
   10 dB pink noise, chrF in all six directions, speed and VRAM. Used to order the ladders.
 
 **Phase 6 — Paid backends ✅ done**
-- Claude (Anthropic SDK, `claude-opus-5` at low effort with server-side refusal fallbacks,
+- Claude (Anthropic SDK, `claude-opus-5-5` at low effort with server-side refusal fallbacks,
   model selectable), DeepL, OpenAI chat; OpenAI transcription and Deepgram for recognition;
   keys in the OS credential store; usage and cost estimate in the settings window.
   Soniox end-to-end streaming was not implemented (no key to verify the protocol against).
@@ -241,8 +241,31 @@ needs no code change. The user can always override profile or individual compone
 - Not verified on real hardware: AMD/Intel GPUs (the Vulkan runtime was tested on NVIDIA),
   macOS and Linux.
 
-**Later (v2+)**: streaming partial results (LocalAgreement), per-app capture (Windows process
-loopback API), diarization, more languages, glossary UI.
+**Phase 8 — After the first real-video test ✅ done** (user feedback: Japanese recognition weak on
+unclear or casual speech, lines too late, overlay couldn't be resized, tray icon not found; wants furigana)
+- Japanese recognition: ReazonSpeech k2 (Zipformer, CPU) on every profile; measured on Japanese TV
+  speech with `tfv eval run --set reazonspeech` (EVAL.md). The user prefers Japanese accuracy over
+  translation quality when hardware forces a choice; here both improve, since the GPU stays free.
+- Live text: the utterance being spoken is re-recognized every ~0.6 s (finished phrases first) and
+  shown as "partial" captions with the id of the final one; phrases are cut at 8 s; Silero VAD is
+  reset after each utterance (its state hid new voices after short pauses).
+- Furigana (SudachiPy + SudachiDict core, readings over the kanji only) drawn by a custom widget.
+- Overlay: resize by the side edges, right-click menu, Ctrl+Alt+S, a first-start notice (Windows 11
+  hides new tray icons).
+
+**Phase 9 — Second real-video test ✅ done** (feedback: speech with background music or singing
+still missed; wants text size and the common functions directly on the bar)
+- The VAD judges a GTCRN-denoised copy of the audio (sherpa-onnx streaming denoiser, 0.5 MB); the
+  recognizer gets the original. Measured with FMA music under TV speech (EVAL.md); Spleeter vocal
+  separation and denoising the recognizer's input were both worse.
+- A toolbar on the unlocked bar (text size, furigana, original, languages, pause, lock, settings,
+  quit), a faint unlock button at the corner of the locked bar, Ctrl+Alt+= / Ctrl+Alt+- for text size.
+- Model choice still follows the hardware (profiles, fit checks, benchmarks, step-down while running);
+  Japanese recognition is ReazonSpeech on the CPU everywhere, the translator scales with the GPU.
+
+**Later (v2+)**: per-app capture (Windows process loopback API), automatic spoken-language
+detection, recognizing sung lyrics (needs Japanese singing data to measure), diarization, more
+languages, glossary UI.
 
 ---
 

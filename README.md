@@ -39,19 +39,31 @@ Models download on first use to the `models` folder inside the project
 ```
 
 A subtitle bar appears near the bottom of the screen and a 譯 icon in the
-system tray (green = listening, orange = loading, grey = paused). The first
-start takes a few minutes while models download; the bar shows progress.
+system tray (green = listening, orange = loading, grey = paused). Windows 11
+hides new tray icons under **^**, so the bar has the same menu: unlock it
+and right-click it. The first start takes a few minutes while models
+download; the bar shows progress.
 
-- **Languages**: tray menu → *Spoken language* and *Translate into* (or *Off*
-  for captions only). The spoken language must be chosen; there is no
-  automatic detection yet.
-- **Move / resize**: unlock the overlay (tray menu or Ctrl+Alt+L), drag it,
-  drag its corner; lock it again so clicks pass through to the video.
+- **Live text**: the words appear while they are still being spoken (dimmer
+  until the phrase is complete) and the translation follows each phrase.
+- **Furigana**: Japanese lines show small hiragana readings above the kanji.
+- **Background music**: the speech detector hears a denoised copy of the audio,
+  so speech under music or noise isn't missed (Settings → Models turns it off).
+- **Buttons on the bar**: while it is unlocked, a toolbar above the captions has
+  A− / A+ (text size), ふりがな, 原文 (original text), the languages (e.g. 日→中),
+  pause, lock, settings and quit. While locked, clicks go through to the video
+  and a faint lock at the bar's corner unlocks it.
+- **Move / resize**: unlock the bar, drag it to move it, drag its left or right
+  edge to resize it, then lock it again.
+- **Menu** (right-click the unlocked bar, or the tray icon): the same functions,
+  plus hide. The spoken language must be chosen; there is no automatic detection yet.
 - **Hotkeys**: Ctrl+Alt+P pause · Ctrl+Alt+L lock/unlock · Ctrl+Alt+O original
-  text on/off · Ctrl+Alt+H hide/show.
-- **Settings** (tray menu or double-click the icon): capture device (the
-  default follows speaker/earphones automatically), microphone input, models,
-  API keys, overlay size/opacity, and live speed statistics.
+  text on/off · Ctrl+Alt+H hide/show · Ctrl+Alt+S settings · Ctrl+Alt+= / Ctrl+Alt+-
+  text size.
+- **Settings** (⚙ on the bar, the menu, Ctrl+Alt+S or double-click the icon):
+  capture device (the default follows speaker/earphones automatically),
+  microphone input, models, API keys, overlay size/opacity, live text, furigana,
+  and live speed statistics.
 
 Settings are saved in `%APPDATA%\tfv\settings.json`; the log is
 `%APPDATA%\tfv\tfv.log`.
@@ -90,20 +102,22 @@ recognition or translation falls behind.
 
 | Profile | When | Recognition | Translation |
 |---|---|---|---|
-| gpu-high | NVIDIA ≥ 16 GB | Whisper large-v3 | Qwen3.5 9B / TranslateGemma 12B → … |
-| gpu-mid | NVIDIA 8–12 GB | Whisper large-v3-turbo | Qwen3.5 9B / TranslateGemma 12B → 4B → 2B |
-| gpu-small | NVIDIA 4–6 GB | English: Whisper turbo (GPU); Chinese/Japanese: SenseVoice (CPU) | into Chinese: TranslateGemma 4B; into English/Japanese: Qwen3.5 4B; → Qwen3.5 2B → NLLB |
-| vulkan-gpu | AMD / Intel Arc / NVIDIA without CUDA | SenseVoice (CPU) | same 4B choices via Vulkan → 2B → NLLB |
-| apple | Apple Silicon | SenseVoice (CPU) | same 4B choices via Metal → 2B → NLLB |
-| cpu-high / cpu-low | no usable GPU | SenseVoice (CPU) | Qwen3.5 2B (CPU) / NLLB |
-
-On a 4 GB GPU, Whisper and a 4B translator don't fit together, so for
-Chinese and Japanese speech the app recognizes on the CPU (nearly as
-accurate) and gives the GPU to the better translator; for English speech,
-where Whisper is much better in noise, it keeps Whisper and a 2B translator.
-The measurements are in [EVAL.md](EVAL.md). A 4B model runs only if it fits in
-the VRAM actually free, so a GPU-heavy game or video player can push it down to 2B.
+| gpu-high | NVIDIA ≥ 16 GB | Japanese: ReazonSpeech (CPU); others: Whisper large-v3 | Qwen3.5 9B / TranslateGemma 12B → … |
+| gpu-mid | NVIDIA 8–12 GB | Japanese: ReazonSpeech (CPU); others: Whisper large-v3-turbo | Qwen3.5 9B / TranslateGemma 12B → 4B → 2B |
+| gpu-small | NVIDIA 4–6 GB | Japanese: ReazonSpeech (CPU); Chinese: SenseVoice (CPU); English: Whisper turbo (GPU) | into Chinese: TranslateGemma 4B; into English/Japanese: Qwen3.5 4B; → Qwen3.5 2B → NLLB |
+| vulkan-gpu | AMD / Intel Arc / NVIDIA without CUDA | Japanese: ReazonSpeech; others: SenseVoice (CPU) | same 4B choices via Vulkan → 2B → NLLB |
+| apple | Apple Silicon | Japanese: ReazonSpeech; others: SenseVoice (CPU) | same 4B choices via Metal → 2B → NLLB |
+| cpu-high / cpu-low | no usable GPU | Japanese: ReazonSpeech; others: SenseVoice (CPU) | Qwen3.5 2B (CPU) / NLLB |
 | cloud | only when chosen | OpenAI / Deepgram | DeepL / Claude / OpenAI |
+
+Japanese is recognized by ReazonSpeech (trained on 35,000 hours of Japanese
+TV) on the CPU: on TV speech it makes far fewer errors than Whisper, and it
+leaves the GPU to the translator. On a 4 GB GPU, Whisper and a 4B translator
+don't fit together, so Chinese speech is recognized on the CPU too (nearly as
+accurate); for English speech, where Whisper is much better in noise, the app
+keeps Whisper and a 2B translator. The measurements are in [EVAL.md](EVAL.md).
+A 4B model runs only if it fits in the VRAM actually free, so a GPU-heavy game
+or video player can push it down to 2B.
 
 Local LLM translation runs in llama.cpp's `llama-server` (downloaded
 automatically, Vulkan build on Windows), started on the discrete GPU and sized
@@ -117,7 +131,7 @@ to the VRAM left after speech recognition.
 
 Stores a key in Windows Credential Manager (or set `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `DEEPL_AUTH_KEY`, `DEEPGRAM_API_KEY`). Then choose it:
-`--mt claude` (default model `claude-opus-5`; e.g. `--mt claude:claude-haiku-4-5`
+`--mt claude` (default model `claude-opus-5-5`; e.g. `--mt claude:claude-haiku-4-5`
 is cheaper and faster), `--mt deepl`, `--mt openai`, `--asr openai`,
 `--asr deepgram`, or `--profile cloud`. Paid services are never used unless
 chosen; audio or text is then sent to that provider. The settings window shows
@@ -159,6 +173,10 @@ have not been tested yet.
 
 Downloads 20 FLEURS clips per language and writes [EVAL.md](EVAL.md) with
 recognition error rates (clean and noisy), translation chrF, speed and VRAM.
+FLEURS is read speech; for real Japanese TV speech (news, dramas, variety),
+add `--set reazonspeech` to both commands (200 clips of the ReazonSpeech test
+set, Japanese recognition only, report in `EVAL-reazonspeech.md`). The clips
+are TV recordings: keep them on your computer.
 
 ## Packaging
 
@@ -181,6 +199,9 @@ bundled.
   automatically, or force a lighter option (`--asr sensevoice-small`, `--mt nllb-600m`).
 - **CUDA errors**: install the `[nvidia]` extra; the cuDNN version must match
   the one bundled with ctranslate2 (see `pyproject.toml`).
+- **`pip install` fails with "No such file or directory … PySide6\qml\…"**: the
+  folder path is too long for Windows; use a shorter one (e.g. `D:\tfv`) or
+  enable Windows long paths.
 - **A hotkey does nothing**: another program owns it; the log says which.
 
 ## Tests
@@ -191,7 +212,8 @@ bundled.
 
 ## Model licenses
 
-Whisper (MIT), SenseVoice (FunASR model license), Silero VAD (MIT),
-Qwen3.5 (Apache-2.0), TranslateGemma (Gemma Terms of Use), Hunyuan-MT (Tencent
-Hunyuan Community License, excludes EU/UK/South Korea), NLLB-200
-(CC-BY-NC-4.0, non-commercial). `tfv models` lists the license of each.
+Whisper (MIT), Kotoba-Whisper (MIT), ReazonSpeech k2 (Apache-2.0), SenseVoice
+(FunASR model license), Silero VAD (MIT), Qwen3.5 (Apache-2.0), TranslateGemma
+(Gemma Terms of Use), Hunyuan-MT (Tencent Hunyuan Community License, excludes
+EU/UK/South Korea), NLLB-200 (CC-BY-NC-4.0, non-commercial). `tfv models` lists
+the license of each. Furigana come from SudachiPy and SudachiDict (Apache-2.0).

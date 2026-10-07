@@ -88,14 +88,18 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--token", help="shared secret clients must send (generated if listening beyond this PC)")
     _model_args(s)
 
-    e = sub.add_parser("eval", help="measure recognition/translation quality and speed on this machine (FLEURS)")
+    e = sub.add_parser("eval", help="measure recognition/translation quality and speed on this machine")
     e.set_defaults(func=cmd_eval)
     e.add_argument("action", choices=("download", "run"))
-    e.add_argument("--n", type=int, default=20, help="clips per language to download (default 20)")
-    e.add_argument("--asr", nargs="*", default=["whisper-large-v3-turbo@cuda", "whisper-small@cuda", "sensevoice-small@cpu"])
+    e.add_argument(
+        "--set", choices=("fleurs", "reazonspeech"), default="fleurs",
+        help="fleurs: read speech in all 3 languages, with translations (default); reazonspeech: Japanese TV speech",
+    )  # fmt: skip
+    e.add_argument("--n", type=int, help="clips to download: per language for fleurs (default 20), in total for reazonspeech (default 200)")
+    e.add_argument("--asr", nargs="*", help="recognizers to measure (default: a set suited to the data)")
     e.add_argument("--mt", nargs="*", default=["nllb-600m@cpu", "qwen3.5-2b@gpu", "qwen3.5-4b@gpu", "translategemma-4b@gpu"])
     e.add_argument("--snr", type=float, default=10.0, help="noise level for the noisy condition, dB (default 10)")
-    e.add_argument("--out", type=Path, default=Path("EVAL.md"), help="Markdown report (default EVAL.md)")
+    e.add_argument("--out", type=Path, help="Markdown report (default EVAL.md, or EVAL-reazonspeech.md)")
 
     m = sub.add_parser("models", help="list, download or remove models")
     m.set_defaults(func=cmd_models)
@@ -122,8 +126,9 @@ def _model_args(parser) -> None:
     group.add_argument("--no-adapt", action="store_true", help="never switch to lighter models while running")
     group.add_argument("--threads", type=int, help="CPU threads for the models")
     group.add_argument("--vad-threshold", type=float, default=0.5, help="speech probability that starts an utterance")
+    group.add_argument("--no-vad-denoise", action="store_true", help="let the VAD hear the raw audio (by default a denoised copy, which finds speech under music)")
     group.add_argument("--min-silence-ms", type=int, default=500, help="pause that ends an utterance")
-    group.add_argument("--max-segment-s", type=float, default=12.0, help="split longer speech")
+    group.add_argument("--max-segment-s", type=float, default=8.0, help="split longer speech (keeps translations coming)")
 
 
 def _session_config(args):
@@ -135,7 +140,7 @@ def _session_config(args):
         capture=getattr(args, "capture", "output"), audio_device=getattr(args, "audio_device", None),
         file=getattr(args, "file", None), realtime=getattr(args, "realtime", False),
         profile=args.profile, asr=args.asr, mt=args.mt, mt_url=args.mt_url,
-        threads=args.threads, adapt=not args.no_adapt,
+        threads=args.threads, adapt=not args.no_adapt, vad_denoise=not args.no_vad_denoise,
         segmenter=SegmenterConfig(threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s),
     )  # fmt: skip
 
@@ -161,22 +166,37 @@ def cmd_devices(args) -> int:
 def cmd_eval(args) -> int:
     from tfv import evaluation, hardware
 
+    japanese_tv = args.set == "reazonspeech"
     if args.action == "download":
-        evaluation.download(args.n, status=log.info)
+        if japanese_tv:
+            evaluation.download_reazonspeech(args.n or 200, status=log.info)
+        else:
+            evaluation.download(args.n or 20, status=log.info)
         return 0
-    samples = evaluation.load_manifest()
+    samples = evaluation.load_manifest(args.set)
+    default_asr = (
+        ["sensevoice-small@cpu", "reazonspeech-k2-v2@cpu", "whisper-large-v3-turbo@cuda", "kotoba-whisper-v2.0@cuda"]
+        if japanese_tv
+        else ["whisper-large-v3-turbo@cuda", "whisper-small@cuda", "sensevoice-small@cpu"]
+    )
     asr_clean, asr_noisy, mt = [], [], []
-    for choice in args.asr:
+    for choice in args.asr if args.asr is not None else default_asr:
         log.info("Recognition %s (clean)", choice)
-        asr_clean.append(evaluation.run_asr(choice, samples, None, status=log.info))
+        asr_clean.append(evaluation.run_asr(choice, samples, None, status=log.info, data=args.set))
         log.info("Recognition %s (noisy)", choice)
-        asr_noisy.append(evaluation.run_asr(choice, samples, args.snr, status=log.info))
+        asr_noisy.append(evaluation.run_asr(choice, samples, args.snr, status=log.info, data=args.set))
+    if japanese_tv:
+        out = args.out or Path("EVAL-reazonspeech.md")
+        out.write_text(evaluation.report_reazonspeech(hardware.probe(), len(samples), asr_clean, asr_noisy), "utf-8")
+        log.info("Wrote %s", out)
+        return 0
     for choice in args.mt:
         log.info("Translation %s", choice)
         mt.append(evaluation.run_mt(choice, samples, status=log.info))
     n = max(sum(1 for s in samples if s["lang"] == lang) for lang in languages.SUPPORTED)
-    args.out.write_text(evaluation.report(hardware.probe(), n, asr_clean, asr_noisy, mt), "utf-8")
-    log.info("Wrote %s", args.out)
+    out = args.out or Path("EVAL.md")
+    out.write_text(evaluation.report(hardware.probe(), n, asr_clean, asr_noisy, mt), "utf-8")
+    log.info("Wrote %s", out)
     return 0
 
 
@@ -194,6 +214,7 @@ def cmd_serve(args) -> int:
 def cmd_hardware(args) -> int:
     from tfv import hardware, keys, models, resources
 
+    models.set_progress_listener(_progress_printer())  # checking GPU fit may fetch llama.cpp first
     hw = hardware.probe()
     print(f"CPU:  {hw.cpu}, {hw.physical_cores} cores / {hw.logical_cores} threads")
     print(f"RAM:  {hw.ram_mb / 1024:.1f} GB ({hw.ram_free_mb / 1024:.1f} GB free)")
@@ -290,8 +311,8 @@ def cmd_listen(args) -> int:
     print_lock = threading.Lock()
 
     def show(c: Caption) -> None:
-        if c.stage == "text" and c.target_lang is not None:
-            return  # printed together with its translation
+        if c.stage in ("partial", "dropped") or (c.stage == "text" and c.target_lang is not None):
+            return  # live text isn't printed; a line is printed together with its translation
         stamp = f"[{int(c.start // 60):02d}:{c.start % 60:04.1f}]"
         cont = "…" if c.forced else " "  # cut mid-speech; the sentence continues on the next line
         line = f"{stamp}{cont} {c.text}"

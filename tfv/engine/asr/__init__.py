@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from tfv import languages
+from tfv import languages, models
 from tfv.engine.asr.base import ASRBackend, ASRResult
 
 log = logging.getLogger(__name__)
@@ -14,6 +14,9 @@ def create_asr(choice, *, language: str, threads: int | None = None, api_key: st
     """Build and warm up the recognizer described by a resources.Choice."""
     if language not in languages.SUPPORTED:
         raise ValueError(f"unsupported language {language!r}; choose from {', '.join(languages.SUPPORTED)}")
+    info = models.CATALOG.get(choice.model or "")
+    if info and info.languages and language not in info.languages:
+        raise ValueError(f"{info.id} recognizes only {', '.join(languages.NAMES[l] for l in info.languages)}")
     if choice.backend == "faster-whisper":
         from tfv.engine.asr.faster_whisper_backend import FasterWhisperBackend
 
@@ -23,6 +26,10 @@ def create_asr(choice, *, language: str, threads: int | None = None, api_key: st
         from tfv.engine.asr.sensevoice_backend import SenseVoiceBackend
 
         asr = SenseVoiceBackend(language, num_threads=threads)
+    elif choice.backend == "reazonspeech":
+        from tfv.engine.asr.reazonspeech_backend import ReazonSpeechBackend
+
+        asr = ReazonSpeechBackend(language, num_threads=threads)
     else:
         from tfv.engine.asr.cloud import create_cloud_asr
 

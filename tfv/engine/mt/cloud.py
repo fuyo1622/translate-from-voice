@@ -14,11 +14,11 @@ from tfv.engine.mt.llm import LLMTranslator, chat_messages, clean_output
 
 log = logging.getLogger(__name__)
 
-CLAUDE_DEFAULT_MODEL = "claude-opus-5"
+CLAUDE_DEFAULT_MODEL = "claude-opus-5-5"
 OPENAI_DEFAULT_MODEL = "gpt-6-luna"
 
 # Models that take server-side refusal fallbacks (a declined line is retried on another model).
-_CLAUDE_FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
+_CLAUDE_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
 
 class ClaudeTranslator(Translator):

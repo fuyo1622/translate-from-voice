@@ -1,13 +1,17 @@
 """Wires capture, segmentation, recognition and translation together on background threads.
 
     source ──audio──► segmenter thread ──utterances──► ASR thread ──captions──► MT thread
-                                                          │                        │
-                                                          └──── on_caption ◄───────┘
+                            │ (live snapshots)          ▲  │                        │
+                            └───────────────────────────┘  └──── on_caption ◄──────┘
 
 The capture side never blocks. When recognition or translation falls behind
 live audio, the oldest waiting work is dropped (and counted) so captions stay
 current; `stats()` exposes the numbers the resource manager uses to downgrade.
 Backends can be swapped while running (see replace_asr / replace_translator).
+
+With `partials` on, the utterance still being spoken is recognized again every
+`partial_interval` seconds and emitted as a "partial" caption (live text) with
+the id its final caption will have; finished utterances always go first.
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ _END = object()
 
 
 @dataclass
+class _Discarded:
+    """The segmenter dropped this utterance as noise: withdraw its live text."""
+
+    utterance: int
+
+
+@dataclass
 class Caption:
     id: int
     start: float
@@ -44,7 +55,10 @@ class Caption:
     target_lang: str | None = None
     translation: str | None = None
     stage: str = "text"
-    """"text" (recognized), "translated", or "untranslated" (translation failed or was skipped)."""
+    """"partial" (still being spoken), "text" (recognized), "translated", "untranslated"
+    (translation failed or was skipped), or "dropped" (the live text was noise: remove it)."""
+    ruby: list | None = None
+    """For Japanese: `text` split into (text, reading or None) pairs, for furigana."""
     asr_s: float = 0.0
     mt_s: float = 0.0
     waited_s: float = 0.0
@@ -68,6 +82,10 @@ class Pipeline:
         target_lang: str | None = None,
         translator: Translator | None = None,
         postprocess: Callable[[str, str], str | None] = lambda text, lang: text or None,
+        readings: Callable[[str], list] | None = None,
+        vad_denoiser=None,
+        partials: bool = False,
+        partial_interval: float = 0.6,
         idle_flush_s: float = 0.6,
         max_waiting: int = 4,
         context_lines: int = 3,
@@ -78,8 +96,21 @@ class Pipeline:
         self._translator = translator
         self._on_caption = on_caption
         self._postprocess = postprocess
+        self._readings = readings
+        """Furigana for Japanese captions (see tfv.engine.furigana)."""
+        self._denoiser = vad_denoiser
+        """Cleans what the VAD hears, so speech under music isn't missed (see tfv.engine.denoise)."""
         self.source_lang = source_lang
         self.target_lang = target_lang
+        self.partials = partials
+        """Emit live text for the utterance still being spoken (settable while running)."""
+        self._partial_interval = partial_interval
+        self._partial_job: SpeechSegment | None = None  # the latest snapshot waiting for the recognizer
+        self._partial_lock = threading.Lock()
+        self._partial_cost = 0.0  # seconds the last live recognition took
+        self._last_partial_at = 0.0
+        self._caption_ids: dict[int, int] = {}  # utterance number -> caption id (ASR thread only)
+        self._last_final = 0  # highest utterance number recognized in full
         self._idle_flush_s = idle_flush_s
         live = source.realtime
         # files are processed completely; live audio drops stale work instead
@@ -192,27 +223,130 @@ class Pipeline:
                 # WASAPI sends nothing while nothing plays, so silence never
                 # arrives to close the utterance; close it on a timeout instead.
                 if not idle_handled and time.monotonic() - last_audio >= self._idle_flush_s:
-                    self._put_latest(self._utterances, self._segmenter.flush(), "utterance")
+                    self._close_utterance()
                     idle_handled = True
                 continue
             if chunk is _END:
-                self._put_latest(self._utterances, self._segmenter.flush(), "utterance")
+                self._close_utterance()
                 self._utterances.put(_END)
                 return
             if self._paused.is_set():
-                self._segmenter.flush()  # discard the partial utterance
+                self._close_utterance(keep=False)
                 continue
             last_audio, idle_handled = time.monotonic(), False
-            for segment in self._segmenter.push(chunk):
+            if self._denoiser is not None:  # the VAD judges a denoised copy; utterances keep the original
+                original, clean = self._denoiser.push(chunk)
+            else:
+                original, clean = chunk, None
+            for segment in self._segmenter.push(original, clean):
                 self._put_latest(self._utterances, segment, "utterance")
+            self._forward_discarded()
+            if self.partials and self._source.realtime:
+                self._offer_partial()
+
+    def _close_utterance(self, keep: bool = True) -> None:
+        """The audio went quiet, ended or was paused: finish the utterance in progress (or drop it)."""
+        done = []
+        if self._denoiser is not None:
+            original, clean = self._denoiser.flush()
+            done += self._segmenter.push(original, clean) if len(original) else []
+        done.append(self._segmenter.flush())
+        for segment in done:
+            if segment is None:
+                continue
+            if keep:
+                self._put_latest(self._utterances, segment, "utterance")
+            else:
+                self._segmenter.discarded.append(segment.utterance)  # withdraw its live text
+        self._forward_discarded()
+
+    def _forward_discarded(self) -> None:
+        for utterance in self._segmenter.discarded:
+            try:
+                self._utterances.put_nowait(_Discarded(utterance))
+            except queue.Full:
+                pass  # recognition is behind; the next finished utterance withdraws it
+        self._segmenter.discarded.clear()
+
+    def _offer_partial(self) -> None:
+        """Hand the recognizer the utterance spoken so far, at most once per interval."""
+        now = time.monotonic()
+        if now - self._last_partial_at < max(self._partial_interval, 1.5 * self._partial_cost):
+            return
+        snapshot = self._segmenter.snapshot()
+        if snapshot is None or snapshot.duration < 0.8:
+            return
+        with self._partial_lock:
+            self._partial_job = snapshot  # replaces one the recognizer hasn't got to yet
+        self._last_partial_at = now
+
+    def _take_partial(self) -> SpeechSegment | None:
+        with self._partial_lock:
+            job, self._partial_job = self._partial_job, None
+        return job
 
     def _asr_loop(self) -> None:
         try:
-            while (segment := self._utterances.get()) is not _END:
-                if not self._stopping.is_set():
+            while True:
+                try:
+                    segment = self._utterances.get(timeout=0.05)
+                except queue.Empty:  # nothing finished: time for live text
+                    if (job := self._take_partial()) is not None and not self._stopping.is_set():
+                        self._recognize_partial(job)
+                    continue
+                if segment is _END:
+                    break
+                if isinstance(segment, _Discarded):
+                    self._last_final = max(self._last_final, segment.utterance)
+                    self._withdraw(segment.utterance, 0.0)
+                elif not self._stopping.is_set():
                     self._recognize(segment)
         finally:
             self._to_translate.put(_END)
+
+    def _withdraw(self, utterance: int, at: float) -> None:
+        """Remove the live text shown for an utterance that will have no caption."""
+        if (shown := self._caption_ids.pop(utterance, None)) is not None:
+            self._emit(Caption(shown, at, at, False, self.source_lang, "", stage="dropped"))
+
+    def _caption_id(self, utterance: int) -> int:
+        if utterance not in self._caption_ids:
+            self._caption_ids[utterance] = next(self._ids)
+        return self._caption_ids[utterance]
+
+    def _ruby(self, text: str, lang: str) -> list | None:
+        if self._readings is None or lang != "ja":
+            return None
+        try:
+            return self._readings(text)
+        except Exception:
+            log.exception("Could not look up readings")
+            self._readings = None
+            return None
+
+    def _recognize_partial(self, segment: SpeechSegment) -> None:
+        if segment.utterance <= self._last_final:
+            return  # finished meanwhile
+        with self._asr_lock:
+            source_lang = self.source_lang
+            try:
+                result = self._asr.transcribe(segment.audio)
+            except Exception:
+                log.debug("Live recognition failed", exc_info=True)
+                return
+        self._partial_cost = result.compute_s
+        text = self._postprocess(result.text, source_lang)
+        if not text or segment.utterance <= self._last_final:
+            return
+        target = self.target_lang
+        translating = self._translator is not None and bool(target) and target != source_lang
+        self._emit(
+            Caption(
+                id=self._caption_id(segment.utterance), start=segment.start, end=segment.end, forced=False,
+                source_lang=source_lang, text=text, target_lang=target if translating else None, stage="partial",
+                ruby=self._ruby(text, source_lang), asr_s=result.compute_s,
+            )  # fmt: skip
+        )
 
     def _recognize(self, segment: SpeechSegment) -> None:
         waited = time.monotonic() - segment.created_at
@@ -222,14 +356,20 @@ class Pipeline:
                 result = self._asr.transcribe(segment.audio)
             except Exception:
                 log.exception("Recognition failed for a %.1fs utterance", segment.duration)
-                return
-        text = self._postprocess(result.text, source_lang)
+                result = None
+        self._last_final = max(self._last_final, segment.utterance)
+        shown = self._caption_ids.pop(segment.utterance, None)  # its live text, if any was shown
+        for skipped in [u for u in self._caption_ids if u < self._last_final]:  # dropped while recognition was behind
+            self._withdraw(skipped, segment.start)
+        text = self._postprocess(result.text, source_lang) if result else None
         if not text:
+            if shown is not None:  # the live text turned out to be noise
+                self._emit(Caption(shown, segment.start, segment.end, segment.forced, source_lang, "", stage="dropped"))
             return
         caption = Caption(
-            id=next(self._ids), start=segment.start, end=segment.end, forced=segment.forced,
-            source_lang=source_lang, text=text, asr_s=result.compute_s, waited_s=waited,
-            speech_ended_at=segment.created_at,
+            id=shown or next(self._ids), start=segment.start, end=segment.end, forced=segment.forced,
+            source_lang=source_lang, text=text, ruby=self._ruby(text, source_lang), asr_s=result.compute_s,
+            waited_s=waited, speech_ended_at=segment.created_at,
         )  # fmt: skip
         self._recent.append(caption)
         target = self.target_lang

@@ -32,7 +32,7 @@ from tfv.ui.prefs import Prefs
 log = logging.getLogger(__name__)
 
 _CLOUD_ASR = ["openai:gpt-4o-mini-transcribe", "openai:gpt-4o-transcribe", "deepgram:nova-3"]
-_CLOUD_MT = ["claude", "claude:claude-sonnet-5", "claude:claude-haiku-4-5", "deepl", "openai", "openai-compatible:MODEL"]
+_CLOUD_MT = ["claude", "claude:claude-sonnet-5-5", "claude:claude-haiku-4-5", "deepl", "openai", "openai-compatible:MODEL"]
 
 
 def _language_combo(include_off: bool) -> QComboBox:
@@ -125,11 +125,14 @@ class SettingsDialog(QDialog):
         self.mt_url.setPlaceholderText("only for openai-compatible, e.g. http://localhost:11434 (Ollama)")
         self.adapt = QCheckBox("Switch to lighter models automatically if captions fall behind")
         self.adapt.setChecked(self.prefs.adapt)
+        self.vad_denoise = QCheckBox("Find speech under background music and noise")
+        self.vad_denoise.setChecked(self.prefs.vad_denoise)
         form.addRow("Hardware profile:", self.profile)
         form.addRow("Speech recognition:", self.asr)
         form.addRow("Translation:", self.mt)
         form.addRow("Server URL:", self.mt_url)
         form.addRow("", self.adapt)
+        form.addRow("", self.vad_denoise)
         form.addRow("", _wrap_label("“auto” uses the profile's first option that fits this computer; see `python -m tfv hardware`."))
         self.remote_url = QLineEdit(self.prefs.remote_url)
         self.remote_url.setPlaceholderText("empty = run here; or ws://PC-address:8765 from `tfv serve` on a stronger PC")
@@ -182,21 +185,31 @@ class SettingsDialog(QDialog):
         self.clear_after = _spin(2, 60, self.prefs.clear_after_s, " s")
         self.show_original = QCheckBox("Show the original text above the translation")
         self.show_original.setChecked(self.prefs.show_original)
-        self.show_together = QCheckBox("Show the original and its translation at the same time")
+        self.live_text = QCheckBox("Show the words while they are still being spoken (live)")
+        self.live_text.setChecked(self.prefs.live_text)
+        self.furigana = QCheckBox("Show readings above kanji in Japanese (furigana)")
+        self.furigana.setChecked(self.prefs.furigana)
+        self.show_together = QCheckBox("Without live text: show the original and its translation at the same time")
         self.show_together.setChecked(self.prefs.show_together)
         self.locked = QCheckBox("Lock the overlay (clicks pass through to the window below)")
         self.locked.setChecked(self.prefs.locked)
+        self.unlock_button = QCheckBox("While locked, show a small unlock button at its corner")
+        self.unlock_button.setChecked(self.prefs.unlock_button)
         form.addRow("Text size:", self.font_size)
         form.addRow("Background opacity:", self.opacity)
         form.addRow("Captions on screen:", self.lines)
         form.addRow("Clear after silence:", self.clear_after)
         form.addRow("", self.show_original)
+        form.addRow("", self.live_text)
+        form.addRow("", self.furigana)
         form.addRow("", self.show_together)
         form.addRow("", self.locked)
+        form.addRow("", self.unlock_button)
         return w
 
     def _fill_devices(self, selected: str | None) -> None:
         self.device.clear()
+        devices = []
         try:
             if self.capture.currentData() == "input":
                 from tfv.capture.input_device import list_input_devices as list_devices
@@ -206,10 +219,17 @@ class SettingsDialog(QDialog):
                 from tfv.capture.loopback import list_output_devices as list_devices
 
                 self.device.addItem("Default output (follows speaker / earphones)", None)
-            for dev in list_devices():
+            devices = list_devices()
+            for dev in devices:
                 self.device.addItem(dev["name"], dev["name"])
         except Exception as exc:
             log.warning("Could not list devices: %s", exc)
+        if selected is not None and self.device.findData(selected) < 0:
+            # An unplugged device, or part of a name (as `--audio-device` accepts): keep it, or
+            # pressing Apply for any other change would silently switch to the default device.
+            query = selected.lower()
+            found = any(query == str(d["index"]) or query in d["name"].lower() for d in devices)
+            self.device.addItem(selected if found else f"{selected} (not connected)", selected)
         _select(self.device, selected)
 
     # -- actions ---------------------------------------------------------------------
@@ -225,13 +245,18 @@ class SettingsDialog(QDialog):
         p.mt = self.mt.currentText().strip() or "auto"
         p.mt_url = self.mt_url.text().strip()
         p.adapt = self.adapt.isChecked()
+        p.vad_denoise = self.vad_denoise.isChecked()
         p.font_size = self.font_size.value()
         p.opacity = self.opacity.value() / 100
         p.lines = self.lines.value()
         p.clear_after_s = self.clear_after.value()
         p.show_original = self.show_original.isChecked()
         p.show_together = self.show_together.isChecked()
+        p.furigana = self.furigana.isChecked()
         p.locked = self.locked.isChecked()
+        p.unlock_button = self.unlock_button.isChecked()
+        if self.live_text.isChecked() != p.live_text:
+            self.controller.set_live(self.live_text.isChecked())
         source, target = self.source.currentData(), self.target.currentData()
         if p.engine_key() != before_engine:
             p.source_lang, p.target_lang = source, target

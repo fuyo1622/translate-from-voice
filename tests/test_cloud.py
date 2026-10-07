@@ -91,7 +91,7 @@ def claude_client(response_json):
 
 def claude_message(text="你好。", stop_reason="end_turn", **extra):
     return {
-        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5",
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
         "content": [{"type": "text", "text": text}], "stop_reason": stop_reason, "stop_sequence": None,
         "usage": {"input_tokens": 80, "output_tokens": 6}, **extra,
     }  # fmt: skip
@@ -103,12 +103,21 @@ def test_claude_request_uses_low_effort_and_fallbacks():
     assert t.translate("Hello.", "en", "zh", context=[("Hi.", "嗨。")]) == "你好。"
     req = seen[0]
     body = json.loads(req.content)
-    assert body["model"] == "claude-opus-5"
+    assert body["model"] == "claude-opus-5-5"
     assert body["fallbacks"] == "default" and "server-side-fallback-2026-07-01" in req.headers["anthropic-beta"]
     assert body["output_config"] == {"effort": "low"}
+    assert "thinking" not in body  # Opus 5.5 rejects disabling it; low effort keeps lines quick
     assert [m["role"] for m in body["messages"]] == ["user", "assistant", "user"]
     assert "Traditional Chinese" in body["system"]
-    assert usage.summary() == ["claude claude-opus-5: 1 requests, 86 tokens, ~$0.001"]
+    assert usage.summary() == ["claude claude-opus-5-5: 1 requests, 86 tokens, ~$0.000"]
+
+
+@pytest.mark.parametrize(("model", "fallbacks"), [("claude-sonnet-5-5", True), ("claude-sonnet-5", False), ("claude-fable-5-1", True)])
+def test_claude_fallbacks_only_where_supported(model, fallbacks):
+    seen, http = claude_client(claude_message())
+    ClaudeTranslator("k", model=model, http_client=http).translate("Hello.", "en", "zh")
+    body = json.loads(seen[0].content)
+    assert ("fallbacks" in body) == fallbacks and body["output_config"] == {"effort": "low"}
 
 
 def test_claude_haiku_request_has_no_effort_or_fallbacks():

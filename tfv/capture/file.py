@@ -19,7 +19,7 @@ class FileSource(AudioSource):
     def __init__(self, path: str | Path, realtime: bool = False, block_ms: int = 100):
         self.path = Path(path)
         if not self.path.is_file():
-            raise FileNotFoundError(self.path)
+            raise FileNotFoundError(f"no such file: {self.path}")
         self.realtime = realtime
         self.description = f"file {self.path.name}"
         self._block = SAMPLE_RATE * block_ms // 1000
