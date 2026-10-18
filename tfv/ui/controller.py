@@ -10,7 +10,8 @@ from PySide6.QtCore import QObject, Signal
 from tfv.session import Session, SessionConfig
 from tfv.ui.prefs import Prefs
 
-# Session and remote.RemoteSession share: start, stop, pause, resume, set_languages, set_partials, describe, stats.
+# Session and remote.RemoteSession share: start, stop, pause, resume, set_languages, set_partials, describe,
+# summary, stats.
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ class EngineController(QObject):
         self.error = ""
         self._lock = threading.Lock()
         self._generation = 0  # ignores callbacks from sessions that were replaced
+        self.switching = False
+        """A language switch is loading; choices made meanwhile wait in _wanted (only the latest)."""
+        self._wanted: tuple[str, str | None] | None = None
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -57,7 +61,7 @@ class EngineController(QObject):
         config = SessionConfig(
             source_lang=p.source_lang, target_lang=p.target_lang, capture=p.capture, audio_device=p.audio_device,
             profile=p.profile, asr=p.asr, mt=p.mt, mt_url=p.mt_url or None, adapt=p.adapt, partials=p.live_text,
-            vad_denoise=p.vad_denoise,
+            vad_denoise=p.vad_denoise, separate_vocals=p.separate_vocals, song_mode=p.song_mode,
         )  # fmt: skip
         def on_caption(caption) -> None:
             self._on_caption(caption, generation)
@@ -109,24 +113,38 @@ class EngineController(QObject):
             self._set_state("running")
 
     def set_languages(self, source: str, target: str | None) -> None:
-        """Switch languages; reloads only what the change needs."""
+        """Switch languages; reloads only what the change needs. Choices made while a switch is
+        still loading don't queue up: only the latest one is applied when it finishes."""
         self.prefs.source_lang, self.prefs.target_lang = source, target
         session = self.session
         if session is None:
             if self.state in ("stopped", "error"):
                 self.start()
             return  # a session that is loading picks the prefs up on the next start
-        generation = self._generation
+        with self._lock:
+            self._wanted = (source, target)
+            if self.switching:
+                return
+            self.switching = True
+        threading.Thread(target=self._switch, args=(session, self._generation), name="tfv-languages", daemon=True).start()
 
-        def work():
+    def _switch(self, session, generation: int) -> None:
+        done = None
+        while True:
+            with self._lock:
+                wanted = self._wanted
+                if wanted == done or generation != self._generation:
+                    self.switching = False
+                    break
             try:
-                session.set_languages(source, target)
+                session.set_languages(*wanted)
             except Exception as exc:
                 log.exception("Language switch failed")
                 if generation == self._generation:
                     self.status.emit(f"Could not switch languages: {exc}")
-
-        threading.Thread(target=work, name="tfv-languages", daemon=True).start()
+            done = wanted
+        if generation == self._generation:
+            self.status.emit(session.summary())
 
     def set_live(self, on: bool) -> None:
         """Live text on or off (a session that is still loading reads prefs.live_text when it starts)."""
@@ -136,6 +154,50 @@ class EngineController(QObject):
                 self.session.set_partials(on)
             except Exception as exc:  # a remote engine that went away
                 log.warning("Could not switch live text: %s", exc)
+
+    def set_separation(self, on: bool) -> None:
+        """Music filter on or off; loads or frees it in the background and reports what happened."""
+        self.prefs.separate_vocals = on
+        self.prefs.save()
+        session = self.session
+        if session is None or not hasattr(session, "set_separate_vocals"):
+            return  # a session that is loading reads the prefs; a remote engine decides for itself
+
+        def work():
+            try:
+                session.set_separate_vocals(on)
+                self.status.emit(next((line for line in session.describe() if line.startswith("Music filter:")), ""))
+            except Exception as exc:
+                log.exception("Switching the music filter failed")
+                self.status.emit(f"Could not switch the music filter: {exc}")
+
+        threading.Thread(target=work, name="tfv-separation", daemon=True).start()
+
+    def set_song_mode(self, on: bool) -> None:
+        """Song mode on or off (takes effect with the next music)."""
+        self.prefs.song_mode = on
+        self.prefs.save()
+        session = self.session
+        if session is not None and hasattr(session, "set_song_mode"):
+            session.set_song_mode(on)
+            self.status.emit(next((line for line in session.describe() if line.startswith("Music filter:")), ""))
+
+    def save_recent(self) -> None:
+        """Save the last minute of audio and captions for feedback (local engine only)."""
+        session = self.session
+        if session is None or not hasattr(session, "save_recent"):
+            self.status.emit("Nothing to save yet" if session is None else "Saving is not available with a remote engine")
+            return
+
+        def work():
+            try:
+                path = session.save_recent()
+                self.status.emit(f"Saved the last minute: {path}")
+            except Exception as exc:
+                log.exception("Saving the last minute failed")
+                self.status.emit(f"Could not save the last minute: {exc}")
+
+        threading.Thread(target=work, name="tfv-save", daemon=True).start()
 
     def stats(self) -> dict | None:
         return self.session.stats() if self.session else None

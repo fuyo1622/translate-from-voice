@@ -127,12 +127,18 @@ class SettingsDialog(QDialog):
         self.adapt.setChecked(self.prefs.adapt)
         self.vad_denoise = QCheckBox("Find speech under background music and noise")
         self.vad_denoise.setChecked(self.prefs.vad_denoise)
+        self.separate_vocals = QCheckBox("Music filter: take the music out from under voices (songs, loud music; needs a GPU)")
+        self.separate_vocals.setChecked(self.prefs.separate_vocals)
+        self.song_mode = QCheckBox("Song mode: while music plays, separate it continuously (finds more singing; ~1 s later)")
+        self.song_mode.setChecked(self.prefs.song_mode)
         form.addRow("Hardware profile:", self.profile)
         form.addRow("Speech recognition:", self.asr)
         form.addRow("Translation:", self.mt)
         form.addRow("Server URL:", self.mt_url)
         form.addRow("", self.adapt)
         form.addRow("", self.vad_denoise)
+        form.addRow("", self.separate_vocals)
+        form.addRow("", self.song_mode)
         form.addRow("", _wrap_label("“auto” uses the profile's first option that fits this computer; see `python -m tfv hardware`."))
         self.remote_url = QLineEdit(self.prefs.remote_url)
         self.remote_url.setPlaceholderText("empty = run here; or ws://PC-address:8765 from `tfv serve` on a stronger PC")
@@ -257,6 +263,10 @@ class SettingsDialog(QDialog):
         p.unlock_button = self.unlock_button.isChecked()
         if self.live_text.isChecked() != p.live_text:
             self.controller.set_live(self.live_text.isChecked())
+        if self.separate_vocals.isChecked() != p.separate_vocals:
+            self.controller.set_separation(self.separate_vocals.isChecked())
+        if self.song_mode.isChecked() != p.song_mode:
+            self.controller.set_song_mode(self.song_mode.isChecked())
         source, target = self.source.currentData(), self.target.currentData()
         if p.engine_key() != before_engine:
             p.source_lang, p.target_lang = source, target

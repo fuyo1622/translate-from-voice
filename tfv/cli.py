@@ -15,6 +15,11 @@ log = logging.getLogger("tfv")
 
 
 def main(argv: list[str] | None = None) -> int:
+    if (sys.argv[1:] if argv is None else argv)[:1] == ["--separator-worker"]:
+        # the music separator's helper process in a packaged build (tfv.engine.separate)
+        from tfv.engine.separate import worker_main
+
+        return worker_main((sys.argv[1:] if argv is None else argv)[1:])
     # Transcripts contain CJK text; don't let a legacy console code page crash printing.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -127,6 +132,8 @@ def _model_args(parser) -> None:
     group.add_argument("--threads", type=int, help="CPU threads for the models")
     group.add_argument("--vad-threshold", type=float, default=0.5, help="speech probability that starts an utterance")
     group.add_argument("--no-vad-denoise", action="store_true", help="let the VAD hear the raw audio (by default a denoised copy, which finds speech under music)")
+    group.add_argument("--no-music-filter", action="store_true", help="don't take the music out from under voices on lines with music (needs a GPU)")
+    group.add_argument("--song-mode", action="store_true", help="while music plays, separate it continuously (finds more singing; captions ~1 s later)")
     group.add_argument("--min-silence-ms", type=int, default=500, help="pause that ends an utterance")
     group.add_argument("--max-segment-s", type=float, default=8.0, help="split longer speech (keeps translations coming)")
 
@@ -141,6 +148,7 @@ def _session_config(args):
         file=getattr(args, "file", None), realtime=getattr(args, "realtime", False),
         profile=args.profile, asr=args.asr, mt=args.mt, mt_url=args.mt_url,
         threads=args.threads, adapt=not args.no_adapt, vad_denoise=not args.no_vad_denoise,
+        separate_vocals=not args.no_music_filter, song_mode=args.song_mode,
         segmenter=SegmenterConfig(threshold=args.vad_threshold, min_silence_ms=args.min_silence_ms, max_segment_s=args.max_segment_s),
     )  # fmt: skip
 

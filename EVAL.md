@@ -9,6 +9,10 @@
   on a stream of TV clips (a new voice after a short pause went unheard for up to 2.5 s).
 - Background music: the VAD judges a GTCRN-denoised copy of the audio (the recognizer still gets the
   original); with music as loud as the speech, missed lines fell from 8 of 30 to 1 (last section).
+- Songs and loud music: on lines with music, the recognizer hears the voices with the music taken out
+  (UVR MDX-Net in half precision on a GPU, via DirectML). Sung lyrics under music as loud as the
+  voice: 30.5% → 21.6% errors (19.6% for the singing alone); music 5 dB louder: 51.4% → 23.2%. Song
+  mode (a switch) also lets the VAD hear the separated voices: 81% of the singing found instead of 46%.
 - SenseVoice (CPU) beat Whisper small (GPU) in every language, so it replaced it as the fallback.
 - On 4 GB GPUs, Chinese/Japanese speech uses SenseVoice on the CPU so the GPU can hold a 4B
   translator (ja→zh chrF 24 vs 14 for 2B); English speech keeps Whisper turbo (much better in noise) + Qwen3.5-2B.
@@ -102,5 +106,80 @@ Silero VAD misses speech when music is loud; ReazonSpeech copes with the music o
 utterance. So the VAD now judges a copy cleaned by GTCRN (0.5 MB, streaming, ~15% of one core, 20 ms
 delay) and the recognizer gets the original. Confirmed live through the whole engine (20 clips, music as
 loud as the speech): instrumental 24.5% → 14.2% CER, with singing 24.8% → 16.1% and no lines lost
-(no music: 15.8%), latency unchanged. Recognizing sung lyrics themselves was not measured (no
-Japanese singing data available without an account).
+(no music: 15.8%), latency unchanged.
+
+Music louder than the speech (−5 dB), and two alternatives: DPDFNet (a 10 MB denoiser) instead of
+GTCRN, and giving the recognizer a 50/50 blend of the denoised and the original audio. Same 30 lines:
+
+| Music | none | GTCRN, VAD only (default) | GTCRN, recognizer hears a blend | DPDFNet, VAD only | DPDFNet, blend |
+|---|---|---|---|---|---|
+| instrumental, 0 dB | 49.3% (8) | **20.9% (1)** | 23.5% (1) | 23.3% (1) | 23.3% (1) |
+| instrumental, −5 dB | 100% (30) | **31.6% (2)** | 31.9% (2) | 31.9% (1) | 33.0% (1) |
+| with singing, 0 dB | 41.2% (5) | 25.1% (0) | **24.0% (0)** | 34.2% (2) | 31.6% (2) |
+| with singing, −5 dB | 75.8% (18) | 42.3% (2) | 38.4% (2) | 40.7% (2) | **34.2% (2)** |
+
+None is better across the board, and the differences are within what 30 lines can tell apart,
+so the default stays GTCRN for the VAD only.
+
+### Sung lyrics, and the music filter
+
+48 lines of Japanese songs from GTSinger (CC BY-NC-SA 4.0; a soprano and a tenor, about 25 songs),
+each also spoken by the same singer. Each line goes whole to the recognizer, with instrumental music
+(FMA) under the singing at a given level. Error rate on the kana readings, since lyrics often use
+unusual kanji (蒼い and 青い read the same):
+
+| Recognizer | spoken | sung | sung, music 0 dB | sung, music −5 dB |
+|---|---|---|---|---|
+| ReazonSpeech k2 (default) | **16.9%** | 19.6% | 30.5% | 51.4% |
+| SenseVoice-Small | 19.1% | 20.8% | 30.8% | 45.9% |
+| Whisper large-v3 turbo | 20.3% | **19.0%** | 35.2% (7 lines empty) | 55.5% (14 empty) |
+| Kotoba-Whisper v2.0 | 18.6% | 20.0% | **28.9%** | **42.2%** |
+
+Singing alone is recognized nearly as well as speech; the accompaniment is what hurts. With the
+music taken out first by UVR MDX-Net Voc_FT (64 MB; the smaller UVR_MDXNET_9482 in brackets):
+
+| Recognizer | sung, music 0 dB | sung, music −5 dB |
+|---|---|---|
+| ReazonSpeech k2 | **21.6%** (27.7%) | **23.2%** (33.1%) |
+| SenseVoice-Small | 23.9% (28.9%) | 25.3% (38.5%) |
+| Whisper large-v3 turbo | 21.0% (22.5%) | 22.2% (33.1%) |
+| Kotoba-Whisper v2.0 | 21.9% (30.0%) | 25.1% (34.2%) |
+
+On the 30 TV clips (character error rate): music at the speech's level 23.7% → 20.2%, 5 dB louder
+29.5% → 24.9%. Clean audio is unaffected: spoken lyrics 16.9% → 16.8%, sung 19.6% → 18.9%, clean TV
+speech 19.8% → 20.9% (one or two characters in 30 lines). Spleeter (above) was worse than nothing.
+
+So tfv runs Voc_FT on the lines in which the VAD's denoiser removed at least 4 dB (it removed at
+least 5 dB from every line under music above, and 0–2 dB from most clean speech). It needs a
+graphics chip: through DirectML one model run (5.8 s of audio) takes 0.44 s on the RTX 3050 and
+1.5 s on Intel Iris Xe graphics, but 6–10 s on the 4-core CPU, so it stays off without a GPU.
+It runs in half precision, converted once on first use: the same output (vocals 20.4 dB cleaner),
+half the graphics memory. That is what lets it share the 4 GB card with TranslateGemma 4B. In full
+precision, translation slowed from 0.35 s to 9.6 s per line while it separated, and to 6.6 s even
+when the two took turns (memory was being swapped); in half precision: 0.36 s, and 0.56 s while it
+separated nonstop. In the app, a line with music is shown about 1.3 s after it ends.
+
+### Song mode
+
+The denoised copy still hides much of the singing from the VAD under loud music. In song mode (a
+switch, off by default) the VAD and the recognizer hear the voices separated continuously while the
+denoiser removes 8 dB or more: a model run every 0.75 s over the last 5.5 s, keeping the newest
+0.75 s, with 0.25 s of audio after it. The GTSinger song (10 lines, music 5 dB louder), offline:
+
+| VAD hears | singing found | errors (kana) |
+|---|---|---|
+| the denoised mix (default) | 46% | 55% |
+| song mode: 0.75 s steps, 0.25 s ahead, VAD threshold 0.3 | **81%** | **33%** |
+| the same with threshold 0.5 | 64% | 41% |
+| 1 s steps, 0.3 s ahead, threshold 0.3 | 85% | 35% |
+| 0.6 s steps, 0.1 s ahead, threshold 0.3 | 79% | 35% |
+
+The same song played through the speakers into the real app: filter off, 3 of 10 lines found (79%
+errors); the filter on whole lines, 6 of 10 (65%); song mode, 10 of 10 (33%), with the end of each
+line shown about 2.1 s after it was sung. Song mode keeps the GPU busy ~60% of the time while music
+plays; translation stayed at about 0.5 s per line.
+
+On the user's own recording (2 minutes of a live performance, vocals mixed loud) song mode was no
+clear gain: of six sung lines, two came out better, two worse and two the same, with fewer junk
+captions (3 instead of 5). Finding the singing matters less there; recognizing sung words is the
+harder part. So song mode stays a switch, off by default.

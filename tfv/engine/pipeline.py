@@ -12,6 +12,12 @@ Backends can be swapped while running (see replace_asr / replace_translator).
 With `partials` on, the utterance still being spoken is recognized again every
 `partial_interval` seconds and emitted as a "partial" caption (live text) with
 the id its final caption will have; finished utterances always go first.
+
+With a `separator`, lines in which the VAD's denoiser found music are recognized
+from the voices alone, with the music taken out (songs, talk over loud music).
+If the separator is fast enough, song mode goes further while music plays: the
+VAD and the recognizer hear the voices separated a second at a time, which
+finds much more of the singing than the denoised copy does.
 """
 
 from __future__ import annotations
@@ -25,14 +31,56 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+import numpy as np
+
+from tfv import SAMPLE_RATE
 from tfv.capture.base import AudioSource
 from tfv.engine.asr.base import ASRBackend
 from tfv.engine.mt.base import Translator
 from tfv.engine.segmenter import Segmenter, SpeechSegment
+from tfv.engine.separate import StreamingVoices
 
 log = logging.getLogger(__name__)
 
 _END = object()
+LIVE_SEPARATION_RTF = 0.25
+"""Live text uses the separator only if it takes at most this long per second of audio."""
+SONG_ENTER_DB = 8.0
+"""Song mode starts when the VAD's denoiser removes this much (dB) over the last 2 s: at least 13 dB
+under music as loud as singing, 5-14 dB under music as loud as speech, 0-2 dB for most clean speech."""
+SONG_EXIT_DB = 4.0
+SONG_EXIT_S = 3.0
+"""... and ends after the removal has stayed under SONG_EXIT_DB this long."""
+SONG_MAX_RUN_S = 0.75
+"""Song mode needs a model run every ~0.75 s; slower separators only do whole lines."""
+SONG_VAD_THRESHOLD = 0.3
+"""In song mode the VAD hears separated voices, which it can trust more: on a song with music 5 dB
+louder than the singing, 0.3 found 81% of it (0.5: 64%), with fewer errors (EVAL.md)."""
+
+
+class _MusicLevel:
+    """How much the VAD's denoiser removed from the last couple of seconds of audio, in dB."""
+
+    def __init__(self, seconds: float = 2.0):
+        self._parts: collections.deque[tuple[int, float, float]] = collections.deque()
+        self._limit = int(seconds * SAMPLE_RATE)
+
+    def add(self, original: np.ndarray, clean: np.ndarray) -> None:
+        self._parts.append((len(original), float(original @ original), float(clean @ clean)))
+        while sum(n for n, _, _ in self._parts) - self._parts[0][0] >= self._limit:
+            self._parts.popleft()
+
+    @property
+    def db(self) -> float | None:
+        """None while it is (nearly) silent."""
+        n = sum(p[0] for p in self._parts)
+        heard, kept = sum(p[1] for p in self._parts), sum(p[2] for p in self._parts)
+        if not n or heard < n * 1e-7:
+            return None
+        return 10 * float(np.log10(heard / max(kept, 1e-12)))
+
+    def clear(self) -> None:
+        self._parts.clear()
 
 
 @dataclass
@@ -60,6 +108,8 @@ class Caption:
     ruby: list | None = None
     """For Japanese: `text` split into (text, reading or None) pairs, for furigana."""
     asr_s: float = 0.0
+    sep_s: float = 0.0
+    """Seconds spent taking the music out first (0: the line had none, or no separator)."""
     mt_s: float = 0.0
     waited_s: float = 0.0
     """How long the utterance waited for the recognizer."""
@@ -84,9 +134,12 @@ class Pipeline:
         postprocess: Callable[[str, str], str | None] = lambda text, lang: text or None,
         readings: Callable[[str], list] | None = None,
         vad_denoiser=None,
+        separator=None,
+        music_db: float = 4.0,
         partials: bool = False,
         partial_interval: float = 0.6,
         idle_flush_s: float = 0.6,
+        history_s: float = 60.0,
         max_waiting: int = 4,
         context_lines: int = 3,
     ):
@@ -100,6 +153,21 @@ class Pipeline:
         """Furigana for Japanese captions (see tfv.engine.furigana)."""
         self._denoiser = vad_denoiser
         """Cleans what the VAD hears, so speech under music isn't missed (see tfv.engine.denoise)."""
+        self.separator = separator
+        """Takes the music out from under voices before recognition (see tfv.engine.separate), on
+        lines from which the denoiser removed at least `music_db` (all lines without a denoiser).
+        Settable while running; None turns it off."""
+        self.separator_error: str | None = None
+        """Why the separator was turned off while running, if it failed."""
+        self._music_db = music_db
+        self.song_mode_allowed = True
+        """Use song mode when the separator is fast enough (settable while running)."""
+        self._song: StreamingVoices | None = None  # song mode is on (segmenter thread only)
+        self._vad_threshold = segmenter.config.threshold  # outside song mode
+        self._level = _MusicLevel()
+        self._quiet_samples = 0  # in song mode: how long the music has been gone
+        self.song_mode_s = 0.0
+        """Seconds of audio heard in song mode so far."""
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.partials = partials
@@ -117,6 +185,13 @@ class Pipeline:
         self._utterances: queue.Queue = queue.Queue(maxsize=max_waiting if live else 0)
         self._to_translate: queue.Queue = queue.Queue(maxsize=max_waiting + 2 if live else 0)
         self._audio: queue.Queue = queue.Queue()
+        self._history = np.zeros(int(history_s * SAMPLE_RATE), np.float32)
+        """The last minute of audio (a ring buffer), for "save the last minute" feedback."""
+        self._history_pos = 0
+        self._history_filled = False
+        self._history_total = 0  # samples heard since the start, i.e. the stream time captions use
+        self._history_lock = threading.Lock()
+        self._caption_log: collections.deque[Caption] = collections.deque(maxlen=200)
         self._asr_lock = threading.Lock()
         self._mt_lock = threading.Lock()
         self._context: collections.deque[tuple[str, str]] = collections.deque(maxlen=context_lines)
@@ -189,6 +264,37 @@ class Pipeline:
             self.target_lang = target_lang
             self._context.clear()
 
+    def recent(self) -> tuple[np.ndarray, float, list[Caption]]:
+        """The last minute of audio (oldest first), the stream time it starts at, and the
+        captions finished in it."""
+        with self._history_lock:
+            if self._history_filled:
+                audio = np.concatenate([self._history[self._history_pos :], self._history[: self._history_pos]])
+            else:
+                audio = self._history[: self._history_pos].copy()
+            start = (self._history_total - len(audio)) / SAMPLE_RATE
+        logged = list(self._caption_log)  # a copy: other threads keep adding captions
+        captions = [c for c in logged if c.stage in ("text", "translated", "untranslated") and c.end > start]
+        return audio, start, captions
+
+    def _remember(self, chunk: np.ndarray) -> None:
+        with self._history_lock:
+            n, size = len(chunk), len(self._history)
+            self._history_total += n
+            if n >= size:
+                self._history[:] = chunk[-size:]
+                self._history_pos, self._history_filled = 0, True
+                return
+            end = self._history_pos + n
+            if end <= size:
+                self._history[self._history_pos : end] = chunk
+            else:
+                self._history[self._history_pos :] = chunk[: size - self._history_pos]
+                self._history[: end - size] = chunk[size - self._history_pos :]
+                self._history_filled = True
+            self._history_pos = end % size
+            self._history_filled = self._history_filled or end == size
+
     def stats(self) -> dict:
         """Recent performance: how fast recognition/translation run and what was dropped."""
         recent = list(self._recent)
@@ -199,9 +305,13 @@ class Pipeline:
             "translated": len(translated),
             "asr_rtf": sum(c.asr_s for c in recent) / speech,
             "asr_s": sum(c.asr_s for c in recent) / len(recent) if recent else 0.0,
+            "separated": sum(1 for c in recent if c.sep_s),
+            "sep_s": sum(c.sep_s for c in recent) / max(1, sum(1 for c in recent if c.sep_s)),
             "mt_s": sum(c.mt_s for c in translated) / len(translated) if translated else 0.0,
             "waited_s": max((c.waited_s for c in recent), default=0.0),
             "backlog": self._utterances.qsize() + self._to_translate.qsize(),
+            "song_mode": self._song is not None,
+            "song_mode_s": self.song_mode_s,
             "dropped_utterances": self.dropped_utterances,
             "dropped_translations": self.dropped_translations,
             "failed_translations": self.failed_translations,
@@ -234,18 +344,98 @@ class Pipeline:
                 self._close_utterance(keep=False)
                 continue
             last_audio, idle_handled = time.monotonic(), False
+            self._remember(chunk)
             if self._denoiser is not None:  # the VAD judges a denoised copy; utterances keep the original
                 original, clean = self._denoiser.push(chunk)
+                self._level.add(original, clean)
             else:
                 original, clean = chunk, None
-            for segment in self._segmenter.push(original, clean):
+            self._update_song_mode(len(original))
+            if self._song is not None:
+                segments = self._push_song(original)
+            else:
+                segments = self._segmenter.push(original, clean)
+            for segment in segments:
                 self._put_latest(self._utterances, segment, "utterance")
             self._forward_discarded()
             if self.partials and self._source.realtime:
                 self._offer_partial()
 
+    def _update_song_mode(self, samples: int) -> None:
+        """Start song mode while music plays, if the separator can keep up; end it after the music."""
+        level = self._level.db
+        if self._song is None:
+            separator = self.separator
+            if (
+                separator is None or not self.song_mode_allowed or level is None or level < SONG_ENTER_DB
+                or getattr(separator, "run_s", 1.0) > SONG_MAX_RUN_S
+            ):  # fmt: skip
+                return
+            self._finish_segment()  # what was said before goes the usual way
+            hop = max(0.75, 1.6 * separator.run_s)  # leaves the card time for the translator
+            self._song, self._quiet_samples = StreamingVoices(separator, hop=hop), 0
+            self._vad_threshold = self._segmenter.config.threshold
+            self._segmenter.set_threshold(min(self._vad_threshold, SONG_VAD_THRESHOLD))
+            log.info("Song mode on (the denoiser removed %.0f dB; a separator run every %.2f s)", level, hop)
+            return
+        self.song_mode_s += samples / SAMPLE_RATE
+        self._quiet_samples = self._quiet_samples + samples if level is not None and level < SONG_EXIT_DB else 0
+        if self.separator is None or not self.song_mode_allowed or self._quiet_samples >= SONG_EXIT_S * SAMPLE_RATE:
+            self._end_song_mode()
+
+    def _push_song(self, audio: np.ndarray) -> list[SpeechSegment]:
+        try:
+            blocks = self._song.push(audio)
+        except Exception as exc:
+            self._song_failed(exc)
+            return []
+        segments = []
+        for block in blocks:
+            segments += self._segmenter.push(block, block)
+        for segment in segments:
+            segment.separated = True
+        return segments
+
+    def _end_song_mode(self, keep: bool = True) -> None:
+        song, self._song = self._song, None
+        if song is None:
+            return
+        log.info("Song mode off")
+        self._segmenter.set_threshold(self._vad_threshold)
+        try:
+            block = song.flush() if keep else np.zeros(0, np.float32)
+        except Exception as exc:
+            self._song_failed(exc)
+            return
+        segments = self._segmenter.push(block, block) if len(block) else []
+        segments.append(self._segmenter.flush())
+        for segment in segments:
+            if segment is None:
+                continue
+            segment.separated = True
+            if keep:
+                self._put_latest(self._utterances, segment, "utterance")
+            else:
+                self._segmenter.discarded.append(segment.utterance)
+
+    def _song_failed(self, exc: Exception) -> None:
+        log.exception("Separating the voices failed; recognizing the original audio from now on")
+        self._song = None
+        self._segmenter.set_threshold(self._vad_threshold)
+        self.separator, self.separator_error = None, str(exc)
+        if (segment := self._segmenter.flush()) is not None:
+            self._segmenter.discarded.append(segment.utterance)
+
+    def _finish_segment(self) -> None:
+        """End the utterance in progress, keeping the denoiser running (a switch of what the VAD hears)."""
+        if (segment := self._segmenter.flush()) is not None:
+            self._put_latest(self._utterances, segment, "utterance")
+
     def _close_utterance(self, keep: bool = True) -> None:
         """The audio went quiet, ended or was paused: finish the utterance in progress (or drop it)."""
+        if self._song is not None:
+            self._end_song_mode(keep)
+        self._level.clear()
         done = []
         if self._denoiser is not None:
             original, clean = self._denoiser.flush()
@@ -276,6 +466,7 @@ class Pipeline:
         snapshot = self._segmenter.snapshot()
         if snapshot is None or snapshot.duration < 0.8:
             return
+        snapshot.separated = self._song is not None
         with self._partial_lock:
             self._partial_job = snapshot  # replaces one the recognizer hasn't got to yet
         self._last_partial_at = now
@@ -324,17 +515,36 @@ class Pipeline:
             self._readings = None
             return None
 
+    def _voices(self, segment: SpeechSegment, live: bool = False) -> tuple[np.ndarray, float]:
+        """What to recognize: the voices alone if the line has music and a separator is on;
+        and the seconds that took. Live text skips a slow separator, so finished lines don't
+        wait behind it."""
+        separator = self.separator
+        if separator is None or segment.separated or (segment.noise_db is not None and segment.noise_db < self._music_db):
+            return segment.audio, 0.0
+        if live and getattr(separator, "rtf", 0.0) > LIVE_SEPARATION_RTF:
+            return segment.audio, 0.0
+        t0 = time.perf_counter()
+        try:
+            return separator.vocals(segment.audio), time.perf_counter() - t0
+        except Exception as exc:  # e.g. the graphics chip ran out of memory: don't keep failing
+            if self.separator is separator:  # (not turned off meanwhile)
+                log.exception("Separating the voices failed; recognizing the original audio from now on")
+                self.separator, self.separator_error = None, str(exc)
+            return segment.audio, 0.0
+
     def _recognize_partial(self, segment: SpeechSegment) -> None:
         if segment.utterance <= self._last_final:
             return  # finished meanwhile
+        audio, sep_s = self._voices(segment, live=True)
         with self._asr_lock:
             source_lang = self.source_lang
             try:
-                result = self._asr.transcribe(segment.audio)
+                result = self._asr.transcribe(audio)
             except Exception:
                 log.debug("Live recognition failed", exc_info=True)
                 return
-        self._partial_cost = result.compute_s
+        self._partial_cost = result.compute_s + sep_s
         text = self._postprocess(result.text, source_lang)
         if not text or segment.utterance <= self._last_final:
             return
@@ -350,10 +560,11 @@ class Pipeline:
 
     def _recognize(self, segment: SpeechSegment) -> None:
         waited = time.monotonic() - segment.created_at
+        audio, sep_s = self._voices(segment)
         with self._asr_lock:
             source_lang = self.source_lang
             try:
-                result = self._asr.transcribe(segment.audio)
+                result = self._asr.transcribe(audio)
             except Exception:
                 log.exception("Recognition failed for a %.1fs utterance", segment.duration)
                 result = None
@@ -369,7 +580,7 @@ class Pipeline:
         caption = Caption(
             id=shown or next(self._ids), start=segment.start, end=segment.end, forced=segment.forced,
             source_lang=source_lang, text=text, ruby=self._ruby(text, source_lang), asr_s=result.compute_s,
-            waited_s=waited, speech_ended_at=segment.created_at,
+            sep_s=sep_s, waited_s=waited, speech_ended_at=segment.created_at,
         )  # fmt: skip
         self._recent.append(caption)
         target = self.target_lang
@@ -416,6 +627,8 @@ class Pipeline:
         self._emit(caption)
 
     def _emit(self, caption: Caption) -> None:
+        if caption.stage != "partial":
+            self._caption_log.append(caption)
         try:
             self._on_caption(caption)
         except Exception:

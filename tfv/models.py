@@ -88,6 +88,13 @@ CATALOG: dict[str, ModelInfo] = {
             sha256="e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534",
             summary="GTCRN speech denoiser: lets the VAD find speech under music and noise",
         ),
+        ModelInfo(
+            "uvr-mdx-voc-ft", "vad", "uvr", 64, "MIT app (Ultimate Vocal Remover); model terms not stated",
+            url="https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Voc_FT.onnx",
+            files=("UVR-MDX-NET-Voc_FT.onnx",),
+            sha256="e411182ce2c53541fefdcc99a8f46f2fe03978eb22038b9497c1d9d95a00fad4",
+            summary="UVR MDX-Net Voc_FT: takes the music out from under voices, for lyrics and loud music (GPU)",
+        ),
         _whisper("large-v3-turbo", "mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1620, "Whisper turbo: best speed/quality on NVIDIA GPUs"),
         _whisper("large-v3", "Systran/faster-whisper-large-v3", 3090, "Whisper large-v3: best quality, needs a strong GPU"),
         _whisper("medium", "Systran/faster-whisper-medium", 1530, "Whisper medium"),
@@ -127,17 +134,22 @@ CATALOG: dict[str, ModelInfo] = {
 }
 
 
+def app_dir() -> Path:
+    """The project checkout, or the folder holding tfv.exe in a packaged build."""
+    return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+
+
 def models_dir() -> Path:
-    """Model folder: $TFV_MODELS_DIR, else `models` inside the app folder (the project
-    checkout, or next to tfv.exe in a packaged build), so everything stays in one place."""
-    if env := os.environ.get("TFV_MODELS_DIR"):
-        base = Path(env)
-    elif getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent / "models"
-    else:
-        base = Path(__file__).resolve().parent.parent / "models"
+    """Model folder: $TFV_MODELS_DIR, else `models` inside the app folder, so everything
+    stays in one place."""
+    base = Path(env) if (env := os.environ.get("TFV_MODELS_DIR")) else app_dir() / "models"
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def feedback_dir() -> Path:
+    """Where "save the last minute" puts its recordings: `feedback` inside the app folder."""
+    return app_dir() / "feedback"
 
 
 def get(model_id: str) -> ModelInfo:

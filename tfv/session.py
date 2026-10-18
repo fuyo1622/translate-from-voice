@@ -9,8 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from tfv import hardware, keys, models, resources
-from tfv.engine.pipeline import Caption, Pipeline
+import numpy as np
+
+from tfv import hardware, keys, languages, models, resources
+from tfv.engine.pipeline import SONG_MAX_RUN_S, Caption, Pipeline
 from tfv.engine.segmenter import SegmenterConfig
 from tfv.resources import Choice, Ladder
 
@@ -44,6 +46,12 @@ class SessionConfig:
     """Live text: also emit "partial" captions while someone is still talking."""
     vad_denoise: bool = True
     """Let the VAD hear a denoised copy, so speech under music or noise isn't missed."""
+    separate_vocals: bool = True
+    """On lines with music, take the music out before recognition (songs, talk over loud music),
+    if a graphics chip can do it fast enough (tfv.engine.separate)."""
+    song_mode: bool = False
+    """While music plays, separate continuously so the VAD hears the voices too (finds more singing
+    under loud music; captions about a second later). Needs a fast graphics chip."""
     segmenter: SegmenterConfig = field(default_factory=SegmenterConfig)
 
 
@@ -68,6 +76,9 @@ class Session:
         self.mt_ladder: Ladder | None = None
         self.asr = None
         self.translator = None
+        self.separator = None
+        self.separator_note: str | None = None
+        """Why there is no music filter, when it was wanted."""
         self._monitor: resources.Monitor | None = None
         self._swap_lock = threading.Lock()
         self._last_progress = 0.0
@@ -97,6 +108,8 @@ class Session:
             self.mt_ladder = self._mt_ladder()
             self.translator = self.mt_ladder.load()
             self._status(f"Translation: {self.translator.description}")
+        if cfg.separate_vocals:  # last, so it sees what graphics memory the models left
+            self.separator = self._load_separator()
 
         vad = SileroVAD(models.ensure("silero-vad").main_file)
         denoiser = None
@@ -110,8 +123,10 @@ class Session:
         self.pipeline = Pipeline(
             source, Segmenter(vad, cfg.segmenter), self.asr, self._on_caption,
             source_lang=cfg.source_lang, target_lang=cfg.target_lang, translator=self.translator,
-            postprocess=TextPostProcessor(), readings=furigana.segments, vad_denoiser=denoiser, partials=cfg.partials,
+            postprocess=TextPostProcessor(), readings=furigana.segments, vad_denoiser=denoiser, separator=self.separator,
+            partials=cfg.partials,
         )  # fmt: skip
+        self.pipeline.song_mode_allowed = cfg.song_mode
         self.pipeline.start()
         if source.realtime and cfg.adapt:
             self._monitor = resources.Monitor(self.pipeline, self._step_down)
@@ -127,7 +142,7 @@ class Session:
             self._monitor.stop()
         if self.pipeline:
             self.pipeline.stop()
-        for backend in (self.translator, self.asr):
+        for backend in (self.translator, self.asr, self.separator):
             if backend is not None and hasattr(backend, "close"):
                 backend.close()
 
@@ -145,35 +160,136 @@ class Session:
         if self.pipeline:
             self.pipeline.partials = on
 
+    def set_separate_vocals(self, on: bool) -> None:
+        """Turn the music filter on or off while running (loading it takes a few seconds;
+        turning it off frees its graphics memory)."""
+        self.config.separate_vocals = on
+        with self._swap_lock:
+            if on and self.separator is None:
+                self.separator = self._load_separator()
+                if self.pipeline:
+                    self.pipeline.separator, self.pipeline.separator_error = self.separator, None
+            elif not on and self.separator is not None:
+                if self.pipeline:
+                    self.pipeline.separator = None
+                _close(self.separator)  # waits for a line it is separating
+                self.separator = None
+
+    def set_song_mode(self, on: bool) -> None:
+        """Song mode on or off while running (it starts with the next music)."""
+        self.config.song_mode = on
+        if self.pipeline:
+            self.pipeline.song_mode_allowed = on
+
+    def _filter_line(self) -> str:
+        line = f"Music filter: {self.separator.description}"
+        if getattr(self.separator, "run_s", 1.0) > SONG_MAX_RUN_S:
+            return line + ("; song mode needs a faster graphics chip" if self.config.song_mode else "")
+        return line + ("; song mode on" if self.config.song_mode else "; song mode off")
+
+    def _load_separator(self):
+        """The music filter on a suitable graphics chip, or None (with the reason in separator_note)."""
+        from tfv.engine import separate
+
+        if (reason := separate.unavailable_reason()) is not None:
+            self.separator_note = f"not available: {reason}"
+            return None
+        self._status("Loading the music filter (for songs and loud music)…")
+        try:
+            separator = separate.load()
+        except Exception as exc:  # e.g. offline on first use, or a graphics driver problem
+            log.exception("The music filter could not be loaded")
+            self.separator_note = f"could not be loaded ({exc})"
+            return None
+        if separator is None:
+            self.separator_note = "not available: no graphics chip with room for it that runs it fast enough"
+            return None
+        self.separator_note = None
+        self.separator = separator
+        self._status(self._filter_line())
+        return separator
+
     def describe(self) -> list[str]:
         """What is running, for status displays."""
         lines = [f"Recognition: {self.asr.description}" if self.asr else "Recognition: not loaded"]
-        lines.append(f"Translation: {self.translator.description}" if self.translator else "Translation: off")
+        translating = self.translator is not None and self._wants_translation(self.config.target_lang)
+        lines.append(f"Translation: {self.translator.description}" if translating else "Translation: off")
+        if self.pipeline and self.pipeline.separator_error:
+            lines.append(f"Music filter: stopped after an error ({self.pipeline.separator_error})")
+        elif self.separator is not None:
+            lines.append(self._filter_line())
+        elif self.config.separate_vocals and self.separator_note:
+            lines.append(f"Music filter: {self.separator_note}")
+        else:
+            lines.append("Music filter: off")
         return lines
+
+    def summary(self) -> str:
+        """The languages now in effect, e.g. after a switch."""
+        cfg = self.config
+        spoken = languages.LABELS[cfg.source_lang]
+        if not self._wants_translation(cfg.target_lang):
+            return f"Now: {spoken}, captions only"
+        if self.translator is None:
+            return f"Now: {spoken}; translation could not be loaded (see the log)"
+        return f"Now: {spoken} → {languages.LABELS[cfg.target_lang]}"
 
     def stats(self) -> dict | None:
         return self.pipeline.stats() if self.pipeline else None
 
+    def save_recent(self) -> Path:
+        """Save the last minute of audio and the captions shown for it in the feedback folder,
+        so a bad stretch can be examined later. Returns the WAV file."""
+        import wave
+
+        audio, start, captions = self.pipeline.recent() if self.pipeline else (np.zeros(0), 0.0, [])
+        if not len(audio):
+            raise RuntimeError("nothing heard yet")
+        folder = models.feedback_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = folder / time.strftime("%Y-%m-%d_%H-%M-%S")
+        if stem.with_suffix(".wav").exists():  # saved twice in a second
+            stem = stem.with_name(stem.name + f"_{time.monotonic_ns() % 1000:03d}")
+        with wave.open(str(stem.with_suffix(".wav")), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+        latest: dict[int, object] = {}
+        for c in captions:  # a caption's last state: translated (or not) after its text
+            latest[c.id] = c
+        lines = [self.summary(), *self.describe(), "", "seconds in the WAV | recognized text | translation"]
+        for c in sorted(latest.values(), key=lambda c: c.start):
+            lines.append(f"{max(0.0, c.start - start):6.1f}-{c.end - start:6.1f} | {c.text} | {c.translation or ''}")
+        stem.with_suffix(".txt").write_text("\n".join(lines) + "\n", "utf-8")
+        return stem.with_suffix(".wav")
+
     def set_languages(self, source_lang: str, target_lang: str | None) -> None:
-        """Switch languages while running (reloads the recognizer if the spoken language changed)."""
+        """Switch languages while running, reloading as little as possible.
+
+        The loaded translator handles every language pair, so a new target only retargets it
+        (the model best for that language is picked at the next start), and it stays loaded
+        while translation is off, so switching back is instant. A new spoken language loads
+        the recognizer its profile prefers; the translator is freed first only if that
+        recognizer wants the GPU, so the two are sized together.
+        """
         with self._swap_lock:
             cfg, p, profile = self.config, self.pipeline, self.profile
-            old_source, old_target = cfg.source_lang, cfg.target_lang
+            old_source = cfg.source_lang
             cfg.source_lang, cfg.target_lang = source_lang, target_lang  # ladders read these when loading
-            new_asr_ladder = cfg.asr == "auto" and profile.asr_for(source_lang) != profile.asr_for(old_source)
-            new_mt_ladder = cfg.mt == "auto" and profile.mt_for(target_lang) != profile.mt_for(old_target)
-            if new_asr_ladder:
-                # Another recognizer suits this language (e.g. SenseVoice on the CPU so the GPU can
-                # hold a larger translator): free the translator first so both are sized together.
-                self._status(f"Loading recognition for {source_lang}…")
-                _close(p.replace_translator(None))
-                self.translator, self.mt_ladder = None, None
-                self.asr_ladder = self._asr_ladder()
-                new_asr = self.asr_ladder.load()
+            spoken = languages.LABELS[source_lang]
+            if cfg.asr == "auto" and profile.asr_for(source_lang) != profile.asr_for(old_source):
+                ladder = self._asr_ladder()
+                if ladder.rungs[0].device in ("cuda", "gpu") and self.translator is not None:
+                    _close(p.replace_translator(None))  # e.g. Whisper for English: give it the GPU first
+                    self.translator, self.mt_ladder = None, None
+                self._status(f"Loading recognition for {spoken}…")
+                new_asr = ladder.load()
+                self.asr_ladder = ladder
                 _close(p.replace_asr(new_asr, source_lang))
                 self.asr = new_asr
             elif source_lang != old_source:
-                self._status(f"Switching recognition to {source_lang}…")
+                self._status(f"Switching recognition to {spoken}…")
                 try:
                     self.asr.set_language(source_lang)  # same model, no reload
                     p.replace_asr(self.asr, source_lang)  # same object: only updates the pipeline's language
@@ -181,20 +297,13 @@ class Session:
                     new_asr = self.asr_ladder.load(max(self.asr_ladder.index, 0))
                     _close(p.replace_asr(new_asr, source_lang))
                     self.asr = new_asr
-            if not self._wants_translation(target_lang):
-                _close(p.replace_translator(None))
-                p.set_target(target_lang)
-                self.translator, self.mt_ladder = None, None
-            elif self.translator is None or new_mt_ladder:
-                self._status("Loading translation…")
-                _close(p.replace_translator(None))  # free its memory before loading the next one
-                self.translator = None
+            if self._wants_translation(target_lang) and self.translator is None:
+                self._status(f"Loading the translator for {languages.LABELS[target_lang]} (about 20 s)…")
                 self.mt_ladder = self._mt_ladder()
                 self.translator = self.mt_ladder.load()
                 p.replace_translator(self.translator, target_lang)
             else:
-                p.set_target(target_lang)
-            self._status("Ready")
+                p.set_target(target_lang)  # retarget; with translation off the translator just waits
 
     # -- internals ---------------------------------------------------------------
 

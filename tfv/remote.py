@@ -28,7 +28,7 @@ from typing import Callable
 
 import numpy as np
 
-from tfv import SAMPLE_RATE
+from tfv import SAMPLE_RATE, languages
 from tfv.capture.base import AudioCallback, AudioSource
 from tfv.engine.pipeline import Caption
 from tfv.session import Session, SessionConfig, make_source
@@ -228,6 +228,13 @@ class RemoteSession:
 
     def describe(self) -> list[str]:
         return [f"Remote engine: {self.url}", *self._engine]
+
+    def summary(self) -> str:
+        cfg = self.config
+        spoken = languages.LABELS[cfg.source_lang]
+        if not cfg.target_lang or cfg.target_lang == cfg.source_lang:
+            return f"Now: {spoken}, captions only"
+        return f"Now: {spoken} → {languages.LABELS[cfg.target_lang]} (on {self.url})"
 
     def stats(self) -> None:
         return None

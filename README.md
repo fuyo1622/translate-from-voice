@@ -49,6 +49,15 @@ download; the bar shows progress.
 - **Furigana**: Japanese lines show small hiragana readings above the kanji.
 - **Background music**: the speech detector hears a denoised copy of the audio,
   so speech under music or noise isn't missed (Settings → Models turns it off).
+- **Songs and loud music** (music filter): on lines with music, the music is
+  taken out before recognition, so sung lyrics and talk over loud music come out
+  right (UVR MDX-Net). It needs a graphics chip; in half precision it shares a
+  4 GB card with the translator. The first use downloads the model (64 MB) and
+  Microsoft's DirectML runtime with what converting the model needs (35 MB).
+  **Song mode** goes further while music plays: the speech detector hears the
+  separated voices too, which finds much more singing under loud music, with
+  captions about a second later. The tray menu and Settings → Models turn each
+  on or off; Settings shows which chip runs the filter.
 - **Buttons on the bar**: while it is unlocked, a toolbar above the captions has
   A− / A+ (text size), ふりがな, 原文 (original text), the languages (e.g. 日→中),
   pause, lock, settings and quit. While locked, clicks go through to the video
@@ -59,7 +68,11 @@ download; the bar shows progress.
   plus hide. The spoken language must be chosen; there is no automatic detection yet.
 - **Hotkeys**: Ctrl+Alt+P pause · Ctrl+Alt+L lock/unlock · Ctrl+Alt+O original
   text on/off · Ctrl+Alt+H hide/show · Ctrl+Alt+S settings · Ctrl+Alt+= / Ctrl+Alt+-
-  text size.
+  text size · Ctrl+Alt+K save the last minute.
+- **Save the last minute** (menu or Ctrl+Alt+K), right after captions go wrong: saves
+  the last 60 s of audio as a WAV, plus the captions shown for it (with times, the
+  languages and the models) as a .txt, in the `feedback` folder of the app folder.
+  Nothing is sent anywhere; git ignores the folder.
 - **Settings** (⚙ on the bar, the menu, Ctrl+Alt+S or double-click the icon):
   capture device (the default follows speaker/earphones automatically),
   microphone input, models, API keys, overlay size/opacity, live text, furigana,
@@ -213,7 +226,10 @@ bundled.
 ## Model licenses
 
 Whisper (MIT), Kotoba-Whisper (MIT), ReazonSpeech k2 (Apache-2.0), SenseVoice
-(FunASR model license), Silero VAD (MIT), Qwen3.5 (Apache-2.0), TranslateGemma
+(FunASR model license), Silero VAD (MIT), GTCRN (MIT), UVR MDX-Net Voc_FT (from
+the MIT-licensed Ultimate Vocal Remover; the model itself states no license),
+ONNX Runtime DirectML (MIT; with onnx, ml_dtypes, protobuf, packaging and
+typing_extensions to convert the model), Qwen3.5 (Apache-2.0), TranslateGemma
 (Gemma Terms of Use), Hunyuan-MT (Tencent Hunyuan Community License, excludes
 EU/UK/South Korea), NLLB-200 (CC-BY-NC-4.0, non-commercial). `tfv models` lists
 the license of each. Furigana come from SudachiPy and SudachiDict (Apache-2.0).

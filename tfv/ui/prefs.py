@@ -30,6 +30,11 @@ class Prefs:
     adapt: bool = True
     vad_denoise: bool = True
     """Find speech under background music and noise (the speech detector hears a denoised copy)."""
+    separate_vocals: bool = True
+    """Music filter: on lines with music, recognize the voices with the music taken out (songs, talk
+    over loud music); needs a graphics chip."""
+    song_mode: bool = False
+    """While music plays, separate continuously so more singing is found (captions ~1 s later)."""
     # overlay
     show_original: bool = True
     show_together: bool = True

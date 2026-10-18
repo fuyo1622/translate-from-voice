@@ -28,6 +28,7 @@ HOTKEYS = {
     "S": "open the settings",
     "=": "bigger text",
     "-": "smaller text",
+    "K": "save the last minute of audio and captions (for feedback)",
 }
 
 _VIRTUAL_KEYS = {"=": 0xBB, "-": 0xBD}  # VK_OEM_PLUS (the =/+ key), VK_OEM_MINUS; letters are their own codes

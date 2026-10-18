@@ -64,6 +64,7 @@ class TrayApp:
             {
                 "P": self.toggle_pause, "L": self.toggle_lock, "O": self.toggle_original, "H": self.toggle_overlay,
                 "S": self.open_settings, "=": lambda: self.change_text_size(+2), "-": lambda: self.change_text_size(-2),
+                "K": self.controller.save_recent,
             }
         )  # fmt: skip
         self._sync_toolbar()
@@ -107,11 +108,14 @@ class TrayApp:
         menu.addSeparator()
         self.original_action = _check(menu, "Show original text", self.prefs.show_original, self._set_original)
         self.furigana_action = _check(menu, "Furigana (readings above kanji)", self.prefs.furigana, self._set_furigana)
+        self.music_action = _check(menu, "Music filter (songs, loud music)", self.prefs.separate_vocals, self.controller.set_separation)
+        self.song_action = _check(menu, "Song mode (finds more singing, captions ~1 s later)", self.prefs.song_mode, self.controller.set_song_mode)
         menu.addAction("Bigger text\tCtrl+Alt+=").triggered.connect(lambda: self.change_text_size(+2))
         menu.addAction("Smaller text\tCtrl+Alt+-").triggered.connect(lambda: self.change_text_size(-2))
         self.lock_action = _check(menu, "Lock overlay (click-through)", self.prefs.locked, self._set_locked)
         self.hide_action = _check(menu, "Hide overlay", False, lambda on: self.overlay.setVisible(not on))
         menu.addSeparator()
+        menu.addAction("Save the last minute (for feedback)\tCtrl+Alt+K").triggered.connect(self.controller.save_recent)
         menu.addAction("Settings…").triggered.connect(self.open_settings)
         menu.addAction("Quit").triggered.connect(self.app.quit)
         return menu
@@ -223,6 +227,8 @@ class TrayApp:
                 action.setChecked(action.data() == value)
         self.original_action.setChecked(self.prefs.show_original)
         self.furigana_action.setChecked(self.prefs.furigana)
+        self.music_action.setChecked(self.prefs.separate_vocals)
+        self.song_action.setChecked(self.prefs.song_mode)
         self.lock_action.setChecked(self.prefs.locked)
         self._sync_toolbar()
 
@@ -230,7 +236,8 @@ class TrayApp:
 
     def _on_status(self, message: str) -> None:
         # while loading, keep each message up until the next one replaces it
-        self.overlay.show_status(message, 3600 if self.controller.state == "loading" else 6)
+        busy = self.controller.state == "loading" or self.controller.switching
+        self.overlay.show_status(message, 3600 if busy else 6)
         self.tray.setToolTip(f"tfv — {message}"[:120])
 
     def _on_state(self, state: str) -> None:

@@ -263,9 +263,31 @@ still missed; wants text size and the common functions directly on the bar)
 - Model choice still follows the hardware (profiles, fit checks, benchmarks, step-down while running);
   Japanese recognition is ReazonSpeech on the CPU everywhere, the translator scales with the GPU.
 
+**Phase 10 — Third real-video test ✅ done** (feedback: talk over music is recognized but
+inaccurate; sung lyrics wanted; switching ja→zh→ja→en stopped translating)
+- Language switching: a new target retargets the loaded translator (instant), the translator stays
+  loaded while translation is off, quick successive choices apply only the latest, and the bar keeps
+  a "Loading…" notice up until it shows what is running ("Now: 日本語 → English").
+- Music filter: on lines with music, UVR MDX-Net (Voc_FT) takes the music out before recognition.
+  Measured on GTSinger lyrics and TV speech under FMA music (EVAL.md). It runs on a GPU through
+  DirectML, in a helper process with a private ONNX Runtime DirectML build downloaded on first use
+  (it can't be installed beside the regular onnxruntime package).
+- "Save the last minute" (menu, Ctrl+Alt+K): the last 60 s of audio and the captions shown for it,
+  saved locally, so failures in real videos can be measured.
+
+**Phase 11 — Videos and songs with the music filter ✅ done** (feedback: talk over music better but
+still often wrong; songs: the delay is not OK; no to 6 s more delay for complete lyrics)
+- The filter runs in half precision (converted once on first use): it shares the 4 GB RTX 3050 with
+  the translator without slowing it, so a line with music shows ~1.3 s after it ends instead of ~3 s
+  on the integrated graphics, and live text uses the separated voices too.
+- Song mode (a switch, off by default): continuous separation in 0.75 s steps feeds the VAD while
+  music plays; 81% of the singing found instead of 46%, captions ~2.1 s after a line. On the user's
+  own clip it was no clear gain, so the user compares it on real songs.
+
 **Later (v2+)**: per-app capture (Windows process loopback API), automatic spoken-language
-detection, recognizing sung lyrics (needs Japanese singing data to measure), diarization, more
-languages, glossary UI.
+detection, the music filter on macOS/Linux (CoreML/CUDA), diarization, more languages, glossary UI;
+for known songs, official lyrics looked up and lined up with what is heard (needs the user's OK to
+query a lyrics service).
 
 ---
 
