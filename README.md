@@ -61,7 +61,9 @@ download; the bar shows progress.
 - **Buttons on the bar**: while it is unlocked, a toolbar above the captions has
   A− / A+ (text size), ふりがな, 原文 (original text), the languages (e.g. 日→中),
   pause, lock, settings and quit. While locked, clicks go through to the video
-  and a faint lock at the bar's corner unlocks it.
+  and a faint lock at the bar's corner unlocks it. While the pointer is on the
+  bar (or on that lock), new captions make it grow downward instead of upward,
+  so the buttons stay where you are aiming.
 - **Move / resize**: unlock the bar, drag it to move it, drag its left or right
   edge to resize it, then lock it again.
 - **Menu** (right-click the unlocked bar, or the tray icon): the same functions,

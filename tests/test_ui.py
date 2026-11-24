@@ -8,10 +8,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, Qt  # noqa: E402
 from PySide6.QtGui import QContextMenuEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QToolButton  # noqa: E402
 
 from tfv.engine.pipeline import Caption  # noqa: E402
 from tfv.hardware import Hardware  # noqa: E402
@@ -98,6 +98,123 @@ def test_overlay_resizes_by_its_side_edges(qt_app):
     assert ov.width() == ov.min_width()
     drag(ov, QPoint(ov.width() // 2, h // 2), QPoint(ov.width() // 2 + 30, h // 2 - 40))  # the middle moves it
     assert (ov.x(), ov.geometry().bottom() + 1, ov.width()) == (50, 460, ov.min_width())
+    ov.close()
+
+
+LONG = caption(9, text="お世話になった広島の皆さんの前で子どもたちと一緒にプレーをさせてもらって" * 3, translation="很榮幸能在廣島的大家面前和孩子們一起踢球。" * 3)
+
+
+def bottom_of(ov) -> int:
+    return ov.geometry().bottom() + 1
+
+
+def centre_of(widget) -> QPoint:
+    return widget.mapToGlobal(widget.rect().center())
+
+
+def test_captions_move_the_buttons_only_while_the_pointer_is_off_the_bar(qt_app):
+    """A new or longer caption line makes the bar taller. It grows upward from its bottom edge, which moves the
+    toolbar; with the pointer on the bar that moved buttons away from a click (or cancelled it between press
+    and release), so then the top holds still and the bar grows at the bottom."""
+    ov = OverlayWindow(Prefs(locked=False, geometry=[100, 300, 600]))
+    pointer = {"on": False}
+    ov._pointer_on_bar = lambda: pointer["on"]
+    ov.show()
+    ov.show_caption(caption(1))
+    bigger = ov.toolbar.buttons["bigger"]
+    was = centre_of(bigger)
+    ov.show_caption(LONG)
+    assert bottom_of(ov) == 300 and centre_of(bigger).y() < was.y()  # pointer elsewhere: grows upward
+
+    pointer["on"] = True
+    ov.clear()
+    ov.show_caption(caption(1))  # shorter now: shrinks at the bottom, the toolbar stays
+    was = centre_of(bigger)
+    for change in (lambda: ov.show_caption(LONG), lambda: ov.show_status("Text size 24 px"), ov.clear):
+        change()
+        assert centre_of(bigger) == was
+    ov.show_caption(LONG)
+    assert bottom_of(ov) > 300  # it grew at the bottom instead
+
+    pointer["on"] = False
+    ov.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert bottom_of(ov) == 300  # off the bar: back on its own bottom edge
+
+    area = ov.screen().availableGeometry()
+    ov._bottom = area.y() + area.height() - 10  # near the bottom of the screen (just above the taskbar)
+    ov.clear()
+    ov.show_caption(caption(1))
+    pointer["on"] = True
+    was = centre_of(bigger)
+    ov.show_caption(LONG)
+    assert centre_of(bigger) == was  # the buttons still hold still, though the bar now reaches past the taskbar
+    ov.close()
+
+
+def test_the_unlock_button_holds_still_under_the_pointer(qt_app):
+    ov = OverlayWindow(Prefs(locked=True, geometry=[100, 300, 600]))
+    pointer = {"on": False}
+    ov._pointer_on_bar = lambda: pointer["on"]
+    ov.show()
+    ov.show_caption(caption(1))
+    pointer["on"] = True
+    was = ov._unlock.pos()
+    ov.show_caption(LONG)
+    assert ov._unlock.pos() == was
+    pointer["on"] = False
+    ov._unlock.left.emit()
+    assert bottom_of(ov) == 300 and ov._unlock.pos().y() < was.y()
+    ov.close()
+
+
+def test_unlocking_puts_no_button_under_the_pointer(qt_app):
+    """The toolbar and the hint appear above the captions, as before: the pointer that clicked the lock is on a
+    caption then, not on a button such as ✕ (a double click must not quit), also when the bar was holding
+    still for the pointer and had grown downward."""
+    for caption_while_on_the_lock in (False, True):
+        ov = OverlayWindow(Prefs(locked=True, geometry=[100, 300, 300]))  # as narrow as it goes
+        pointer = {"on": False}
+        ov._pointer_on_bar = lambda: pointer["on"]
+        ov.show()
+        ov.show_caption(caption(1))
+        row_y = ov._rows[1].translation.mapToGlobal(QPoint(0, 0)).y()
+        pointer["on"] = True
+        if caption_while_on_the_lock:
+            ov.show_caption(LONG)
+        clicked_at = ov._unlock.geometry().center()
+        ov.set_locked(False)
+        assert bottom_of(ov) == 300
+        if not caption_while_on_the_lock:
+            assert ov._rows[1].translation.mapToGlobal(QPoint(0, 0)).y() == row_y  # the captions didn't move
+        assert ov.width() == ov.min_width() and not isinstance(ov.childAt(ov.mapFromGlobal(clicked_at)), QToolButton)
+        ov.close()
+
+
+def test_dragging_puts_the_bar_where_it_is_let_go(qt_app):
+    """A caption arriving while the pointer rested mid-drag made the bar jump up from under it (the bar kept its
+    bottom edge), and letting go then left it there."""
+    prefs = Prefs(locked=False, geometry=[100, 300, 600])
+    ov = OverlayWindow(prefs)
+    ov._pointer_on_bar = lambda: False  # QTest moves no real pointer
+    ov.show()
+    ov.show_caption(caption(1))
+    start = ov.mapToGlobal(QPoint(30, ov.toolbar.geometry().center().y()))  # left of the buttons
+    top = ov.geometry().top()
+
+    def to(delta_y: int) -> QPoint:  # QTest takes positions relative to where the bar is now
+        return ov.mapFromGlobal(start + QPoint(0, delta_y))
+
+    QTest.mousePress(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, to(0))
+    QTest.mouseMove(ov, to(-40))
+    QTest.mouseMove(ov, to(-90))
+    ov.show_caption(LONG)  # the bar gets taller while the pointer rests
+    assert ov.geometry().top() == top - 90  # the part held is still under the pointer
+    let_go = bottom_of(ov)
+    QTest.mouseRelease(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, to(-90))
+    assert bottom_of(ov) == let_go and prefs.geometry == [100, let_go, 600]  # stays, and is saved, as let go
+    ov.clear()
+    ov.show_caption(caption(2))
+    assert bottom_of(ov) == let_go  # later captions grow upward from there
     ov.close()
 
 

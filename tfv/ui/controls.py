@@ -63,6 +63,8 @@ class UnlockButton(QWidget):
     """A small lock at the corner of the locked bar: one click unlocks it (and shows the toolbar)."""
 
     clicked = Signal()
+    left = Signal()
+    """The pointer moved off it (the bar then stops holding still for it)."""
     SIZE = 26
 
     def __init__(self):
@@ -87,6 +89,7 @@ class UnlockButton(QWidget):
     def leaveEvent(self, event) -> None:
         self._hover = False
         self.update()
+        self.left.emit()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

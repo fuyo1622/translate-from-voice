@@ -3,7 +3,9 @@
 Locked, it lets clicks pass through to the video or window below; unlocked, it
 can be dragged, resized by its side edges, and right-clicked for the menu.
 Captions grow upward from a fixed bottom edge, update while someone is still
-talking (live text), and fade out after a few seconds without speech.
+talking (live text), and fade out after a few seconds without speech. While the
+pointer is on the bar, its top edge holds still instead, so its buttons don't
+move away from a click.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from tfv.engine.pipeline import Caption
@@ -105,6 +107,7 @@ class OverlayWindow(QWidget):
         self._layout.addWidget(self.toolbar)
         self._unlock = UnlockButton()  # shown at the corner while locked
         self._unlock.clicked.connect(lambda: self.action_requested.emit("unlock", QPoint()))
+        self._unlock.left.connect(self._pointer_left)
         self._status = QLabel(self)
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._status.setWordWrap(True)
@@ -115,6 +118,9 @@ class OverlayWindow(QWidget):
         self._status_until = 0.0
         self._press: tuple[str, QPoint, QPoint, int] | None = None
         """While the left button is down: (what it does, where it was pressed, top-left then, width then)."""
+        self._held_top: int | None = None
+        """While the pointer is on the bar (or its unlock button): the top edge, kept still so the buttons
+        don't move away from the pointer when captions come and go; the bar then grows at the bottom."""
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._expire)
         self._timer.start(500)
@@ -170,12 +176,13 @@ class OverlayWindow(QWidget):
         else:
             row.translation.setVisible(False)
 
-    def show_status(self, text: str, seconds: float = 6.0) -> None:
-        """A small notice above the captions (loading, errors); empty text hides it."""
+    def show_status(self, text: str, seconds: float = 6.0, hold: bool = True) -> None:
+        """A small notice above the captions (loading, errors); empty text hides it.
+        hold=False: it appears above the captions even while the pointer is on the bar."""
         self._status.setText(text)
         self._status.setFont(font_for("en", max(12, self.prefs.font_size * 6 // 10)))
         self._status_until = time.monotonic() + seconds if text else 0.0
-        self._relayout()
+        self._relayout(hold=hold)
 
     def clear(self) -> None:
         for row in self._rows.values():
@@ -186,7 +193,7 @@ class OverlayWindow(QWidget):
     def set_locked(self, locked: bool) -> None:
         self.prefs.locked = locked
         self._apply_flags()
-        self.show_status("" if locked else UNLOCKED_HINT, 10)
+        self.show_status("" if locked else UNLOCKED_HINT, 10, hold=False)  # with the toolbar, above the captions
 
     def apply_style(self) -> None:
         """Re-read font size, line count and visibility options from prefs (also for captions on screen)."""
@@ -214,7 +221,10 @@ class OverlayWindow(QWidget):
         self.toolbar.setVisible(not self.prefs.locked)
         if was_visible:
             self.show()
-        self._relayout()
+        # the toolbar comes or goes above the captions, which stay where they are (also under the pointer
+        # that just clicked the lock: no button may appear beneath it)
+        self._held_top = None
+        self._relayout(hold=False)
 
     def min_width(self) -> int:
         """Narrowest the bar may be dragged to: the toolbar must fit."""
@@ -247,15 +257,39 @@ class OverlayWindow(QWidget):
             self._bottom = screen.y() + screen.height() - 60
         self._relayout()
 
-    def _relayout(self) -> None:
+    def _relayout(self, hold: bool = True) -> None:
         self._status.setVisible(bool(self._status.text()) and time.monotonic() < self._status_until)
         self._layout.activate()
         width = self._width if self.prefs.locked else max(self._width, self.min_width())
         # -1 when nothing visible wraps (e.g. only the toolbar): then the minimum size decides
         height = max(40, self._layout.totalHeightForWidth(width), self._layout.totalMinimumSize().height())
-        self.setGeometry(QRect(self._x, self._bottom - height, width, height))
+        # Captions grow upward from a fixed bottom edge, which moves the buttons at the top. While the pointer
+        # is on the bar, keep the top still instead, so a click lands on the button it was aimed at.
+        # (Near the bottom of the screen the bar may then reach past the taskbar for a moment: better than a
+        # button jumping away from a click.)
+        if hold and (self._press is not None or self._pointer_on_bar()):
+            if self._held_top is None:
+                self._held_top = self.geometry().top()
+            top = self._held_top
+        else:
+            self._held_top = None
+            top = self._bottom - height
+        self.setGeometry(QRect(self._x, top, width, height))
         self._sync_unlock_button()
         self.update()
+
+    def _pointer_on_bar(self) -> bool:
+        if not self.isVisible():
+            return False
+        pos = QCursor.pos()
+        if self.prefs.locked:  # clicks go through the bar; only its unlock button can be used
+            return self._unlock.isVisible() and self._unlock.geometry().contains(pos)
+        return self.geometry().contains(pos)
+
+    def _pointer_left(self) -> None:
+        """Back to the fixed bottom edge once the pointer is off the bar."""
+        if self._held_top is not None and self._press is None:
+            self._relayout()
 
     def _has_content(self) -> bool:
         return bool(self._rows) or self._status.isVisible()
@@ -310,8 +344,8 @@ class OverlayWindow(QWidget):
             return
         zone, start, top_left, width = self._press
         delta = event.globalPosition().toPoint() - start
-        if zone == "move":
-            self._x, self._bottom = top_left.x() + delta.x(), top_left.y() + delta.y() + self.height()
+        if zone == "move":  # the part held stays under the pointer, even if captions change meanwhile
+            self._x, self._held_top = top_left.x() + delta.x(), top_left.y() + delta.y()
         elif zone == "right":
             self._width = max(self.min_width(), width + delta.x())
         else:  # the left edge moves; the right edge stays put
@@ -321,8 +355,14 @@ class OverlayWindow(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if self._press is not None:
+            if self._press[0] == "move":  # it stays where it was let go: that bottom edge is the new anchor
+                self._bottom = self.geometry().bottom() + 1
             self._press = None
             self._save_geometry()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._pointer_left()
 
     def contextMenuEvent(self, event) -> None:
         self.menu_requested.emit(event.globalPos())
